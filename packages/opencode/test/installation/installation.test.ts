@@ -240,6 +240,9 @@ describe("installation", () => {
       expect(Installation.compareVersions("v1.18.0", "1.17.11.2")).toBe(1)
       expect(Installation.compareVersions("1.18.0-beta.1", "1.18.0")).toBe(-1)
       expect(Installation.compareVersions("1.18.0", "1.18.0-beta.1")).toBe(1)
+      expect(Installation.compareVersions("1.18.0-rc-2", "1.18.0-rc-1")).toBe(1)
+      expect(Installation.compareVersions("1.18.0-rc-1", "1.18.0-rc-2")).toBe(-1)
+      expect(Installation.compareVersions("1.18.0-rc-1", "1.18.0-rc-1")).toBe(0)
     })
 
     test("classifies release types for four-segment versions", () => {

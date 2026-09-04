@@ -81,19 +81,10 @@ Unit tests:
 cd packages/opencode && bun test test/installation
 ```
 
-Without a TTY, drive `upgrade()` directly and bake the installed version in with `bun --define`. Save this next to the repo and run it from `packages/opencode`:
-
-```ts
-import { GlobalBus } from "../packages/opencode/src/bus/global"
-import { upgrade } from "../packages/opencode/src/cli/upgrade"
-
-GlobalBus.on("event", (e) => console.log(e.directory, e.payload.type, e.payload.properties?.version))
-await upgrade()
-process.exit(0)
-```
+Without a TTY, `packages/opencode/script/check-upgrade.ts` drives `upgrade()` directly and prints the global events it emits. Bake in an installed version with `bun --define` to simulate a release binary. Run it from `packages/opencode`:
 
 ```sh
-bun run --define 'OPENCODE_VERSION:"1.17.11.1"' --define 'OPENCODE_CHANNEL:"latest"' ../check-upgrade.ts
+bun run --define 'OPENCODE_VERSION:"1.17.11.1"' --define 'OPENCODE_CHANNEL:"latest"' script/check-upgrade.ts
 ```
 
 ## Verification (2026-09-03)

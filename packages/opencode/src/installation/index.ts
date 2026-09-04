@@ -25,10 +25,12 @@ export const Event = InstallationEvent
 // semver rejects. Compare segment by segment; missing segments count as zero and a build
 // without a prerelease tag ranks above the same version with one.
 function parseVersion(value: string) {
-  const [core = "", prerelease] = value.trim().replace(/^v/, "").split("-", 2)
+  const trimmed = value.trim().replace(/^v/, "")
+  const hyphen = trimmed.indexOf("-")
+  const core = hyphen < 0 ? trimmed : trimmed.slice(0, hyphen)
   return {
     segments: core.split(".").map((part) => Number.parseInt(part, 10) || 0),
-    prerelease,
+    prerelease: hyphen < 0 ? undefined : trimmed.slice(hyphen + 1),
   }
 }
 
