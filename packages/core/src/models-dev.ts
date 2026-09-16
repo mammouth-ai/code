@@ -167,7 +167,7 @@ function capitalize(word: string): string {
   return word ? word[0].toUpperCase() + word.slice(1) : word
 }
 
-function humanizeModelName(name: string): string {
+export function humanizeModelName(name: string): string {
   const parts = name.split(/[-_]+/)
   if (parts.length === 0) return name
 
@@ -186,11 +186,22 @@ function humanizeModelName(name: string): string {
       }
       const version = versionParts.join(".")
       const modelType = capitalize(filtered[idx] ?? "")
-      return `Claude ${version} ${modelType}`.trim()
+      // Anything after the model type is a variant such as "fast"; keep it so
+      // variants don't collapse onto the base model's name.
+      const variant = filtered
+        .slice(idx + 1)
+        .map((p) => capitalize(p))
+        .join(" ")
+      return `Claude ${version} ${modelType} ${variant}`.trim()
     }
     const modelType = capitalize(filtered[1] ?? "")
-    const versionParts = filtered.slice(2).filter((p) => VERSION_PART.test(p))
-    return versionParts.length > 0 ? `Claude ${modelType} ${versionParts.join(".")}` : `Claude ${modelType}`
+    const rest = filtered.slice(2)
+    const versionParts = rest.filter((p) => VERSION_PART.test(p))
+    const variant = rest
+      .filter((p) => !VERSION_PART.test(p))
+      .map((p) => capitalize(p))
+      .join(" ")
+    return [`Claude ${modelType}`, versionParts.join("."), variant].filter(Boolean).join(" ")
   }
 
   const specialCases: Record<string, string> = { gpt: "GPT", o4: "o4", glm: "GLM" }
