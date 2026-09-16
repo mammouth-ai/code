@@ -239,9 +239,25 @@ export const RunCommand = effectCmd({
         hidden: true,
         describe: "cap visible interactive replay to the newest N messages",
       })
-      .option("dangerously-skip-permissions", {
+      .option("interactive", {
+        alias: ["i"],
+        type: "boolean",
+        describe: "run in direct interactive split-footer mode",
+        default: false,
+      })
+      .option("auto", {
         type: "boolean",
         describe: "auto-approve permissions that are not explicitly denied (dangerous!)",
+        default: false,
+      })
+      .option("yolo", {
+        type: "boolean",
+        hidden: true,
+        default: false,
+      })
+      .option("dangerously-skip-permissions", {
+        type: "boolean",
+        hidden: true,
         default: false,
       })
       .option("demo", {
@@ -261,6 +277,7 @@ export const RunCommand = effectCmd({
     yield* Effect.promise(async () => {
       const rawMessage = [...args.message, ...(args["--"] || [])].join(" ")
       const interactive = args.mini
+      const auto = args.auto || args.yolo || args["dangerously-skip-permissions"]
       const thinking = interactive ? (args.thinking ?? true) : (args.thinking ?? false)
       const die = (message: string): never => {
         UI.error(message)
@@ -685,9 +702,14 @@ export const RunCommand = effectCmd({
         // created, and replies issued from inside the loop must use that client.
         async function loop(client: OpencodeClient, events: Awaited<ReturnType<typeof sdk.event.subscribe>>) {
           const toggles = new Map<string, boolean>()
+          const sessions = new Set([sessionID])
           let error: string | undefined
 
           for await (const event of events.stream) {
+            if (event.type === "session.created" && event.properties.info.parentID) {
+              if (sessions.has(event.properties.info.parentID)) sessions.add(event.properties.info.id)
+            }
+
             if (
               event.type === "message.updated" &&
               event.properties.sessionID === sessionID &&
@@ -786,9 +808,9 @@ export const RunCommand = effectCmd({
 
             if (event.type === "permission.asked") {
               const permission = event.properties
-              if (permission.sessionID !== sessionID) continue
+              if (!sessions.has(permission.sessionID)) continue
 
-              if (args["dangerously-skip-permissions"]) {
+              if (auto) {
                 await client.permission.reply({
                   requestID: permission.id,
                   reply: "once",
@@ -989,9 +1011,12 @@ export async function runMini(input: MiniCommandInput) {
     variant: undefined,
     thinking: undefined,
     mini: true,
+    interactive: false,
     replay: input.replay ?? true,
     "replay-limit": input.replayLimit,
     replayLimit: input.replayLimit,
+    auto: false,
+    yolo: false,
     "dangerously-skip-permissions": false,
     dangerouslySkipPermissions: false,
     demo: input.demo ?? false,

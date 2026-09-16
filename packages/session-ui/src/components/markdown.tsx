@@ -1,30 +1,37 @@
-import { useMarked } from "@opencode-ai/ui/context/marked"
 import { useI18n } from "@opencode-ai/ui/context/i18n"
 import morphdom from "morphdom"
 import { checksum } from "@opencode-ai/core/util/encode"
 import {
-  ComponentProps,
+  type Accessor,
+  type ComponentProps,
   createEffect,
-  createMemo,
   createResource,
   createSignal,
   createUniqueId,
   onCleanup,
+  type Setter,
   splitProps,
 } from "solid-js"
-import { isServer } from "solid-js/web"
-import { bundledLanguages } from "shiki"
-import { canReusePendingBlock, project, type Block, type Projection } from "./markdown-stream"
+import { isServer, render } from "solid-js/web"
+import { Icon as IconV2 } from "@opencode-ai/ui/v2/icon"
+import { IconButtonV2 } from "@opencode-ai/ui/v2/icon-button-v2"
+import { TooltipV2 } from "@opencode-ai/ui/v2/tooltip-v2"
+import { canReusePendingBlock, completedProjection } from "./markdown-projection"
+import type { Block, Projection } from "./markdown-stream"
 import {
+  disposeMarkdownProjection,
   disposeStreamingCode,
   highlightStreamingCode,
   MarkdownWorkerDisposedError,
   MarkdownWorkerSupersededError,
   MarkdownWorkerUnavailableError,
+  parseMarkdown,
+  projectMarkdown,
 } from "./markdown-worker"
 import { markdownBlockKey, type MarkdownToken } from "./markdown-worker-protocol"
 import { shouldResetCodeTokens, type RenderedCodeState } from "./markdown-code-state"
 import { getCachedMarkdown, sanitizeMarkdown, touchCachedMarkdown, type MarkdownCacheEntry } from "./markdown-cache"
+import { inlineCodeKind } from "./markdown-inline-code-kind"
 
 type RenderedBlock =
   | (MarkdownCacheEntry & { key: string; mode: Exclude<Block["mode"], "code"> })
@@ -47,11 +54,6 @@ type RenderResult = {
 
 const renderedCodeTokens = new WeakMap<HTMLDivElement, RenderedCodeState>()
 
-const iconPaths = {
-  copy: '<path d="M6.2513 6.24935V2.91602H17.0846V13.7493H13.7513M13.7513 6.24935V17.0827H2.91797V6.24935H13.7513Z" stroke="currentColor" stroke-linecap="round"/>',
-  check: '<path d="M5 11.9657L8.37838 14.7529L15 5.83398" stroke="currentColor" stroke-linecap="square"/>',
-}
-
 function escape(text: string) {
   return text
     .replace(/&/g, "&amp;")
@@ -66,10 +68,14 @@ function fallback(markdown: string) {
 }
 
 async function code(text: string, language: string | undefined, key: string, complete = false) {
-  const name = language && language in bundledLanguages ? language : "text"
   try {
-    const result = await highlightStreamingCode(key, text, name, complete)
-    return { language: name, generation: result.generation, stable: result.stable, unstable: result.unstable }
+    const result = await highlightStreamingCode(key, text, language ?? "text", complete)
+    return {
+      language: result.language,
+      generation: result.generation,
+      stable: result.stable,
+      unstable: result.unstable,
+    }
   } catch (error) {
     if (
       !(error instanceof MarkdownWorkerDisposedError) &&
@@ -77,7 +83,7 @@ async function code(text: string, language: string | undefined, key: string, com
       !(error instanceof MarkdownWorkerUnavailableError)
     )
       console.error("Markdown highlighting worker failed", error)
-    return { language: name, generation: 0, stable: [], unstable: [[text, ""] as MarkdownToken] }
+    return { language: language ?? "text", generation: 0, stable: [], unstable: [[text, ""] as MarkdownToken] }
   }
 }
 
@@ -85,6 +91,14 @@ type CopyLabels = {
   copy: string
   copied: string
 }
+
+type CopyButtonState = {
+  setLabels: Setter<CopyLabels>
+  setCopied: Setter<boolean>
+  dispose: () => void
+}
+
+const copyButtonState = new WeakMap<HTMLElement, CopyButtonState>()
 
 const urlPattern = /^https?:\/\/[^\s<>()`"']+$/
 
@@ -99,45 +113,96 @@ function codeUrl(text: string) {
   }
 }
 
-function createIcon(path: string, slot: string) {
-  const icon = document.createElement("div")
-  icon.setAttribute("data-component", "icon")
-  icon.setAttribute("data-size", "small")
-  icon.setAttribute("data-slot", slot)
-  const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg")
-  svg.setAttribute("data-slot", "icon-svg")
-  svg.setAttribute("fill", "none")
-  svg.setAttribute("viewBox", "0 0 20 20")
-  svg.setAttribute("aria-hidden", "true")
-  svg.innerHTML = path
-  icon.appendChild(svg)
-  return icon
-}
-
 function createCopyButton(labels: CopyLabels) {
-  const button = document.createElement("button")
-  button.type = "button"
-  button.setAttribute("data-component", "icon-button")
-  button.setAttribute("data-variant", "secondary")
-  button.setAttribute("data-size", "small")
-  button.setAttribute("data-slot", "markdown-copy-button")
-  button.setAttribute("aria-label", labels.copy)
-  button.setAttribute("data-tooltip", labels.copy)
-  button.appendChild(createIcon(iconPaths.copy, "copy-icon"))
-  button.appendChild(createIcon(iconPaths.check, "check-icon"))
-  return button
+  const host = document.createElement("div")
+  host.setAttribute("data-slot", "markdown-copy-button")
+
+  const state: Partial<CopyButtonState> = {}
+  const dispose = render(() => {
+    const [labelState, setLabels] = createSignal(labels, { equals: false })
+    const [copied, setCopied] = createSignal(false)
+    state.setLabels = setLabels
+    state.setCopied = setCopied
+    return <MarkdownCopyButton labels={labelState} copied={copied} />
+  }, host)
+  state.dispose = dispose
+  copyButtonState.set(host, state as CopyButtonState)
+  return host
 }
 
-function setCopyState(button: HTMLButtonElement, labels: CopyLabels, copied: boolean) {
+function MarkdownCopyButton(props: { labels: Accessor<CopyLabels>; copied: Accessor<boolean> }) {
+  const label = () => (props.copied() ? props.labels().copied : props.labels().copy)
+  return (
+    <TooltipV2 placement="top" value={label()}>
+      <IconButtonV2
+        type="button"
+        size="normal"
+        variant="ghost-muted"
+        aria-label={label()}
+        icon={
+          <>
+            <IconV2 name="outline-copy" data-copy-icon />
+            <IconV2 name="check" data-check-icon />
+          </>
+        }
+      />
+    </TooltipV2>
+  )
+}
+
+function setCopyState(host: HTMLElement, labels: CopyLabels, copied: boolean) {
+  const state = copyButtonState.get(host)
+  state?.setLabels(labels)
+  state?.setCopied(copied)
   if (copied) {
-    button.setAttribute("data-copied", "true")
-    button.setAttribute("aria-label", labels.copied)
-    button.setAttribute("data-tooltip", labels.copied)
+    host.setAttribute("data-copied", "true")
     return
   }
-  button.removeAttribute("data-copied")
-  button.setAttribute("aria-label", labels.copy)
-  button.setAttribute("data-tooltip", labels.copy)
+  host.removeAttribute("data-copied")
+}
+
+function disposeCopyButton(host: HTMLElement) {
+  copyButtonState.get(host)?.dispose()
+  copyButtonState.delete(host)
+}
+
+function disposeCopyButtons(root: Element) {
+  const hosts = [
+    ...(root instanceof HTMLElement && root.getAttribute("data-slot") === "markdown-copy-button" ? [root] : []),
+    ...Array.from(root.querySelectorAll('[data-slot="markdown-copy-button"]')).filter(
+      (el): el is HTMLElement => el instanceof HTMLElement,
+    ),
+  ]
+  hosts.forEach(disposeCopyButton)
+}
+
+const shellLanguages = new Set(["bash", "sh", "shell", "zsh", "fish", "console", "terminal"])
+
+function codeKind(language: string | undefined) {
+  const value = language?.toLowerCase()
+  if (!value) return
+  if (shellLanguages.has(value)) return "shell"
+}
+
+function codeLanguage(block: HTMLPreElement) {
+  const code = block.querySelector("code")
+  if (!(code instanceof HTMLElement)) return
+  return code.className.match(/(?:^|\s)language-([^\s]+)/)?.[1]
+}
+
+function applyCodeMetadata(wrapper: HTMLElement, language: string | undefined) {
+  if (!document.body.hasAttribute("data-new-layout")) {
+    delete wrapper.dataset.language
+    delete wrapper.dataset.codeKind
+    return
+  }
+
+  if (language) wrapper.dataset.language = language
+  else delete wrapper.dataset.language
+
+  const kind = codeKind(language)
+  if (kind) wrapper.dataset.codeKind = kind
+  else delete wrapper.dataset.codeKind
 }
 
 function ensureCodeWrapper(block: HTMLPreElement, labels: CopyLabels) {
@@ -147,11 +212,14 @@ function ensureCodeWrapper(block: HTMLPreElement, labels: CopyLabels) {
   if (!wrapped) {
     const wrapper = document.createElement("div")
     wrapper.setAttribute("data-component", "markdown-code")
+    applyCodeMetadata(wrapper, codeLanguage(block))
     parent.replaceChild(wrapper, block)
     wrapper.appendChild(block)
     wrapper.appendChild(createCopyButton(labels))
     return
   }
+
+  applyCodeMetadata(parent, codeLanguage(block))
 
   const buttons = Array.from(parent.querySelectorAll('[data-slot="markdown-copy-button"]')).filter(
     (el): el is HTMLButtonElement => el instanceof HTMLButtonElement,
@@ -163,6 +231,7 @@ function ensureCodeWrapper(block: HTMLPreElement, labels: CopyLabels) {
   }
 
   for (const button of buttons.slice(1)) {
+    disposeCopyButton(button)
     button.remove()
   }
 }
@@ -196,18 +265,30 @@ function markCodeLinks(root: HTMLDivElement) {
   }
 }
 
+function markInlineCode(root: HTMLDivElement) {
+  const codeNodes = Array.from(root.querySelectorAll(":not(pre) > code"))
+  for (const code of codeNodes) {
+    if (!(code instanceof HTMLElement)) continue
+    delete code.dataset.inlineCodeKind
+    const kind = inlineCodeKind(code.textContent ?? "")
+    if (kind) code.dataset.inlineCodeKind = kind
+  }
+}
+
 function decorate(root: HTMLDivElement, labels: CopyLabels) {
   const blocks = Array.from(root.querySelectorAll("pre"))
   for (const block of blocks) {
     ensureCodeWrapper(block, labels)
   }
+  if (!document.body.hasAttribute("data-new-layout")) return
+  markInlineCode(root)
   markCodeLinks(root)
 }
 
 function setupCodeCopy(root: HTMLDivElement, getLabels: () => CopyLabels) {
-  const timeouts = new Map<HTMLButtonElement, ReturnType<typeof setTimeout>>()
+  const timeouts = new Map<HTMLElement, ReturnType<typeof setTimeout>>()
 
-  const updateLabel = (button: HTMLButtonElement) => {
+  const updateLabel = (button: HTMLElement) => {
     const labels = getLabels()
     const copied = button.getAttribute("data-copied") === "true"
     setCopyState(button, labels, copied)
@@ -218,7 +299,7 @@ function setupCodeCopy(root: HTMLDivElement, getLabels: () => CopyLabels) {
     if (!(target instanceof Element)) return
 
     const button = target.closest('[data-slot="markdown-copy-button"]')
-    if (!(button instanceof HTMLButtonElement)) return
+    if (!(button instanceof HTMLElement)) return
     const code = button.closest('[data-component="markdown-code"]')?.querySelector("code")
     const content = code?.textContent ?? ""
     if (!content) return
@@ -235,7 +316,7 @@ function setupCodeCopy(root: HTMLDivElement, getLabels: () => CopyLabels) {
 
   const buttons = Array.from(root.querySelectorAll('[data-slot="markdown-copy-button"]'))
   for (const button of buttons) {
-    if (button instanceof HTMLButtonElement) updateLabel(button)
+    if (button instanceof HTMLElement) updateLabel(button)
   }
 
   root.addEventListener("click", handleClick)
@@ -245,6 +326,7 @@ function setupCodeCopy(root: HTMLDivElement, getLabels: () => CopyLabels) {
     for (const timeout of timeouts.values()) {
       clearTimeout(timeout)
     }
+    disposeCopyButtons(root)
   }
 }
 
@@ -275,6 +357,10 @@ function initialResult(text: string, key: string | undefined, projection: Projec
   }
 }
 
+function pendingProjection(text: string): Projection {
+  return { text, blocks: text ? [{ raw: text, src: text, mode: "live" }] : [] }
+}
+
 export function Markdown(
   props: ComponentProps<"div"> & {
     text: string
@@ -285,21 +371,44 @@ export function Markdown(
   },
 ) {
   const [local, others] = splitProps(props, ["text", "cacheKey", "streaming", "class", "classList"])
-  const marked = useMarked()
   const i18n = useI18n()
   const [root, setRoot] = createSignal<HTMLDivElement>()
   const owner = createUniqueId()
   const activeCodeKeys = new Set<string>()
   const completedCode = new Map<string, Extract<RenderedBlock, { mode: "code" }>>()
-  const projection = createMemo((previous: Projection | undefined) =>
-    project(previous, local.text, local.streaming ?? false),
+  let streamed = false
+  const [projection] = createResource(
+    () => {
+      if (isServer) return
+      const live = local.streaming ?? false
+      if (live) streamed = true
+      if (!live && !streamed) return
+      return { key: owner, text: local.text, live }
+    },
+    (src) => projectMarkdown(src.key, src.text, src.live),
+    { initialValue: pendingProjection("") },
   )
+  const currentProjection = () => {
+    if (!(local.streaming ?? false) && !streamed) return completedProjection(local.text)
+    const value = projection.latest
+    if (value?.text === local.text) return value
+    if (value?.text) return value
+    return pendingProjection(local.text)
+  }
   const [html] = createResource(
     () => {
+      if (isServer)
+        return {
+          text: local.text,
+          key: local.cacheKey,
+          projection: pendingProjection(local.text),
+        }
+      const value = !(local.streaming ?? false) && !streamed ? completedProjection(local.text) : projection.latest
+      if (!value || value.text !== local.text) return
       return {
         text: local.text,
         key: local.cacheKey,
-        projection: projection(),
+        projection: value,
       }
     },
     async (src) => {
@@ -349,7 +458,7 @@ export function Markdown(
           }
 
           const hash = checksum(block.raw)
-          const safe = sanitizeMarkdown(await Promise.resolve(marked.parse(block.src)))
+          const safe = sanitizeMarkdown(await parseMarkdown(block.src))
           if (key && hash) touchCachedMarkdown(key, { raw: block.raw, hash, html: safe })
           return { key: blockKey, mode: block.mode, raw: block.raw, hash: hash ?? "", html: safe }
         }),
@@ -372,7 +481,12 @@ export function Markdown(
         )
     },
     {
-      initialValue: initialResult(local.text, local.cacheKey, projection(), owner),
+      initialValue: initialResult(
+        local.text,
+        local.cacheKey,
+        local.streaming ? pendingProjection(local.text) : completedProjection(local.text),
+        owner,
+      ),
     },
   )
 
@@ -381,11 +495,12 @@ export function Markdown(
   createEffect(() => {
     const container = root()
     const result = html.latest ?? html()
-    const projected = projection()
+    const projected = currentProjection()
     const content = local.text ? pendingBlocks(result, projected, local.cacheKey, owner) : []
     if (!container) return
     if (isServer) return
     if (content.length === 0) {
+      disposeCopyButtons(container)
       container.innerHTML = ""
       return
     }
@@ -401,9 +516,14 @@ export function Markdown(
     activeCodeKeys.clear()
     nextCodeKeys.forEach((key) => activeCodeKeys.add(key))
     content.forEach((block, index) => updateBlock(container, index, block, labels))
-    while (container.children.length > content.length) container.lastElementChild?.remove()
+    while (container.children.length > content.length) {
+      const child = container.lastElementChild
+      if (!child) break
+      disposeCopyButtons(child)
+      child.remove()
+    }
     container
-      .querySelectorAll<HTMLButtonElement>('[data-slot="markdown-copy-button"]')
+      .querySelectorAll<HTMLElement>('[data-slot="markdown-copy-button"]')
       .forEach((button) => setCopyState(button, labels, button.dataset.copied === "true"))
     if (!copyCleanup)
       copyCleanup = setupCodeCopy(container, () => ({
@@ -414,6 +534,7 @@ export function Markdown(
 
   onCleanup(() => {
     if (copyCleanup) copyCleanup()
+    disposeMarkdownProjection(owner)
     activeCodeKeys.forEach(disposeCode)
     completedCode.clear()
   })
@@ -421,6 +542,7 @@ export function Markdown(
   return (
     <div
       data-component="markdown"
+      dir="auto"
       classList={{
         ...local.classList,
         [local.class ?? ""]: !!local.class,
@@ -493,14 +615,18 @@ function updateBlock(container: HTMLDivElement, index: number, block: RenderedBl
   morphdom(current, next, {
     onBeforeElUpdated: (fromEl, toEl) => {
       if (
-        fromEl instanceof HTMLButtonElement &&
-        toEl instanceof HTMLButtonElement &&
+        fromEl instanceof HTMLElement &&
+        toEl instanceof HTMLElement &&
         fromEl.getAttribute("data-slot") === "markdown-copy-button" &&
         toEl.getAttribute("data-slot") === "markdown-copy-button"
       ) {
         return false
       }
       if (fromEl.isEqualNode(toEl)) return false
+      return true
+    },
+    onBeforeNodeDiscarded: (node) => {
+      if (node instanceof Element) disposeCopyButtons(node)
       return true
     },
   })
@@ -522,6 +648,8 @@ function updateCodeBlock(
 
   const code = existing?.querySelector("code")
   if (code instanceof HTMLElement) {
+    const wrapper = code.closest('[data-component="markdown-code"]')
+    if (wrapper instanceof HTMLElement) applyCodeMetadata(wrapper, block.language)
     code.className = `language-${block.language}`
     const previous = renderedCodeTokens.get(next)
     const reset = shouldResetCodeTokens(previous, {
@@ -552,6 +680,7 @@ function updateCodeBlock(
 
   const wrapper = document.createElement("div")
   wrapper.setAttribute("data-component", "markdown-code")
+  applyCodeMetadata(wrapper, block.language)
   const pre = document.createElement("pre")
   pre.className = "shiki OpenCode"
   const codeElement = document.createElement("code")
@@ -568,8 +697,12 @@ function updateCodeBlock(
     unstable: block.unstable,
     raw: block.raw,
   })
-  if (current) current.replaceWith(next)
-  else container.appendChild(next)
+  if (current) {
+    disposeCopyButtons(current)
+    current.replaceWith(next)
+    return
+  }
+  container.appendChild(next)
 }
 
 function sameToken(left: MarkdownToken, right: MarkdownToken | undefined) {

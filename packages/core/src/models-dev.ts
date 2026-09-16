@@ -9,11 +9,16 @@ import { Hash } from "./util/hash"
 import { FSUtil } from "./fs-util"
 import { InstallationChannel, InstallationVersion } from "./installation/version"
 import { EventV2 } from "./event"
-import { LayerNode } from "./effect/layer-node"
-import { httpClient } from "./effect/layer-node-platform"
+import { makeGlobalNode } from "./effect/app-node"
+import { httpClient } from "./effect/app-node-platform"
 
 export const CatalogModelStatus = Schema.Literals(["alpha", "beta", "deprecated"])
 export type CatalogModelStatus = typeof CatalogModelStatus.Type
+
+const InterleavedField = Schema.Union([
+  Schema.Literals(["reasoning", "reasoning_content", "reasoning_text"]),
+  Schema.String,
+])
 
 const USER_AGENT = `opencode/${InstallationChannel}/${InstallationVersion}/${Flag.OPENCODE_CLIENT}`
 
@@ -44,6 +49,21 @@ const Cost = Schema.Struct({
   ),
 })
 
+const ReasoningOption = Schema.Union([
+  Schema.Struct({
+    type: Schema.Literal("effort"),
+    values: Schema.Array(Schema.NullOr(Schema.String)),
+  }),
+  Schema.Struct({
+    type: Schema.Literal("toggle"),
+  }),
+  Schema.Struct({
+    type: Schema.Literal("budget_tokens"),
+    min: Schema.optional(Schema.Finite),
+    max: Schema.optional(Schema.Finite),
+  }),
+])
+
 export const Model = Schema.Struct({
   id: Schema.String,
   name: Schema.String,
@@ -54,11 +74,13 @@ export const Model = Schema.Struct({
   efforts: Schema.optional(Schema.Array(Schema.String)),
   temperature: Schema.Boolean,
   tool_call: Schema.Boolean,
+  reasoning_options: Schema.optional(Schema.Array(ReasoningOption)),
   interleaved: Schema.optional(
     Schema.Union([
-      Schema.Literal(true),
+      Schema.Boolean,
+      InterleavedField,
       Schema.Struct({
-        field: Schema.Literals(["reasoning", "reasoning_content", "reasoning_details"]),
+        field: InterleavedField,
       }),
     ]),
   ),
@@ -145,7 +167,7 @@ function capitalize(word: string): string {
   return word ? word[0].toUpperCase() + word.slice(1) : word
 }
 
-function humanizeModelName(name: string): string {
+export function humanizeModelName(name: string): string {
   const parts = name.split(/[-_]+/)
   if (parts.length === 0) return name
 
@@ -164,11 +186,22 @@ function humanizeModelName(name: string): string {
       }
       const version = versionParts.join(".")
       const modelType = capitalize(filtered[idx] ?? "")
-      return `Claude ${version} ${modelType}`.trim()
+      // Anything after the model type is a variant such as "fast"; keep it so
+      // variants don't collapse onto the base model's name.
+      const variant = filtered
+        .slice(idx + 1)
+        .map((p) => capitalize(p))
+        .join(" ")
+      return `Claude ${version} ${modelType} ${variant}`.trim()
     }
     const modelType = capitalize(filtered[1] ?? "")
-    const versionParts = filtered.slice(2).filter((p) => VERSION_PART.test(p))
-    return versionParts.length > 0 ? `Claude ${modelType} ${versionParts.join(".")}` : `Claude ${modelType}`
+    const rest = filtered.slice(2)
+    const versionParts = rest.filter((p) => VERSION_PART.test(p))
+    const variant = rest
+      .filter((p) => !VERSION_PART.test(p))
+      .map((p) => capitalize(p))
+      .join(" ")
+    return [`Claude ${modelType}`, versionParts.join("."), variant].filter(Boolean).join(" ")
   }
 
   const specialCases: Record<string, string> = { gpt: "GPT", o4: "o4", glm: "GLM" }
@@ -275,7 +308,7 @@ export interface Interface {
 
 export class Service extends Context.Service<Service, Interface>()("@opencode/ModelsDev") {}
 
-export const layer = Layer.effect(
+const layer = Layer.effect(
   Service,
   Effect.gen(function* () {
     const fs = yield* FSUtil.Service
@@ -290,10 +323,10 @@ export const layer = Layer.effect(
       ),
     )
 
-    const source = Flag.OPENCODE_MODELS_URL || "https://models.dev"
+    const source = Flag.OPENCODE_MODELS_URL || "https://models.opencode.ai"
     const filepath = path.join(
       Global.Path.cache,
-      source === "https://models.dev" ? "models.json" : `models-${Hash.fast(source)}.json`,
+      source === "https://models.opencode.ai" ? "models.json" : `models-${Hash.fast(source)}.json`,
     )
     const ttl = Duration.minutes(5)
     const lockKey = `models-dev:${filepath}`
@@ -394,11 +427,6 @@ export const layer = Layer.effect(
   }),
 )
 
-export const defaultLayer = layer.pipe(
-  Layer.provide(FetchHttpClient.layer),
-  Layer.provide(FSUtil.defaultLayer),
-  Layer.provide(EventV2.defaultLayer),
-)
-export const node = LayerNode.make(layer, [FSUtil.node, EventV2.node, httpClient])
+export const node = makeGlobalNode({ service: Service, layer: layer, deps: [FSUtil.node, EventV2.node, httpClient] })
 
 export * as ModelsDev from "./models-dev"

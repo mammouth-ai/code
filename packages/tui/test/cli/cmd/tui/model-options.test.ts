@@ -62,7 +62,8 @@ describe("modelPriceTier", () => {
     expect(modelPriceTier({ input: 1, output: 1 })).toBe(1) // x = 1   -> tier 1
     expect(modelPriceTier({ input: 3, output: 0 })).toBe(2) // x = 2   -> tier 2
     expect(modelPriceTier({ input: 6, output: 6 })).toBe(2) // x = 6   -> tier 2
-    expect(modelPriceTier({ input: 9, output: 9 })).toBe(3) // x = 9   -> tier 3
+    expect(modelPriceTier({ input: 10, output: 10 })).toBe(2) // x = 10  -> tier 2 (upper bound)
+    expect(modelPriceTier({ input: 12, output: 12 })).toBe(3) // x = 12  -> tier 3
     expect(modelPriceTier({ input: 18, output: 18 })).toBe(4) // x = 18 -> tier 4
   })
 

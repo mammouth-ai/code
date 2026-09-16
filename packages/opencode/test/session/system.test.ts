@@ -1,12 +1,13 @@
-import { describe, expect } from "bun:test"
+import { describe, expect, test } from "bun:test"
+import { LayerNode } from "@opencode-ai/core/effect/layer-node"
 import { Effect, Layer } from "effect"
 import type { Agent } from "../../src/agent/agent"
 import { NamedError } from "@opencode-ai/core/util/error"
 import { Skill } from "../../src/skill"
 import { Permission } from "../../src/permission"
+import type { Provider } from "../../src/provider/provider"
 import { SystemPrompt } from "../../src/session/system"
 import { MCP } from "../../src/mcp"
-import { LocationServiceMap } from "@opencode-ai/core/location-layer"
 import { testEffect } from "../lib/effect"
 
 const skills: Skill.Info[] = [
@@ -43,9 +44,9 @@ const build: Agent.Info = {
 }
 
 const it = testEffect(
-  SystemPrompt.layer.pipe(
-    Layer.provide(LocationServiceMap.layer),
-    Layer.provide(
+  LayerNode.compile(SystemPrompt.node, [
+    [
+      MCP.node,
       Layer.mock(MCP.Service, {
         instructions: () =>
           Effect.succeed([
@@ -61,8 +62,9 @@ const it = testEffect(
             },
           ]),
       }),
-    ),
-    Layer.provide(
+    ],
+    [
+      Skill.node,
       Layer.succeed(
         Skill.Service,
         Skill.Service.of({
@@ -77,11 +79,36 @@ const it = testEffect(
           available: () => Effect.succeed(skills),
         }),
       ),
-    ),
-  ),
+    ],
+  ]),
 )
 
 describe("session.system", () => {
+  test("selects the Meta prompt for Muse Spark model IDs", () => {
+    for (const id of ["meta/muse-spark-preview", "muse-spark-1.1", "muse-spark-1.2"]) {
+      const prompt = SystemPrompt.provider({ api: { id } } as Provider.Model)[0]
+      expect(prompt).toContain("powered by Muse Spark,")
+      expect(prompt).toContain("using Meta Muse Spark.")
+      expect(prompt).not.toContain("{{MODEL_NAME}}")
+    }
+  })
+
+  test("selects the Meta prompt for Muse Glimmer model IDs", () => {
+    for (const id of ["meta/muse-glimmer", "meta/muse-glimmer-30b", "muse-glimmer-30b"]) {
+      const prompt = SystemPrompt.provider({ api: { id } } as Provider.Model)[0]
+      expect(prompt).toContain("powered by Muse Glimmer,")
+      expect(prompt).toContain("using Meta Muse Glimmer.")
+      expect(prompt).not.toContain("{{MODEL_NAME}}")
+    }
+  })
+
+  test("selects the Kimi prompt for official provider model IDs", () => {
+    for (const providerID of ["kimi-for-coding", "moonshotai", "moonshotai-cn"]) {
+      const prompt = SystemPrompt.provider({ providerID, api: { id: "k3" } } as Provider.Model)[0]
+      expect(prompt).toContain("# Prompt and Tool Use")
+    }
+  })
+
   it.effect("skills output is sorted by name and stable across calls", () =>
     Effect.gen(function* () {
       const prompt = yield* SystemPrompt.Service

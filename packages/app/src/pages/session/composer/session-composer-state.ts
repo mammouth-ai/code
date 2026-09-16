@@ -25,7 +25,7 @@ export const todoDockAtBoundary = (state: ReturnType<typeof todoState>) => state
 
 const idle = { type: "idle" as const }
 
-export function createSessionComposerState(options?: { closeMs?: number | (() => number) }) {
+export function createSessionComposerController(options?: { closeMs?: number | (() => number) }) {
   const params = useParams()
   const sdk = useSDK()
   const sync = useSync()
@@ -82,7 +82,7 @@ export function createSessionComposerState(options?: { closeMs?: number | (() =>
 
     setStore("responding", perm.id)
     sdk()
-      .client.permission.respond({ sessionID: perm.sessionID, permissionID: perm.id, response })
+      .api.permission.reply({ sessionID: perm.sessionID, requestID: perm.id, reply: response })
       .catch((err: unknown) => {
         const description = err instanceof Error ? err.message : String(err)
         showToast({ title: language.t("common.requestFailed"), description })
@@ -201,4 +201,4 @@ export function createSessionComposerState(options?: { closeMs?: number | (() =>
   }
 }
 
-export type SessionComposerState = ReturnType<typeof createSessionComposerState>
+export type SessionComposerController = ReturnType<typeof createSessionComposerController>

@@ -1,5 +1,6 @@
 export * as Reference from "./reference"
 
+import { makeLocationNode } from "./effect/app-node"
 import { Context, Effect, Layer, Scope, Types } from "effect"
 import { Reference } from "@opencode-ai/schema/reference"
 import { Global } from "./global"
@@ -39,7 +40,7 @@ export interface Interface extends State.Transformable<Draft> {
 
 export class Service extends Context.Service<Service, Interface>()("@opencode/v2/Reference") {}
 
-export const layer = Layer.effect(
+const layer = Layer.effect(
   Service,
   Effect.gen(function* () {
     const global = yield* Global.Service
@@ -57,7 +58,6 @@ export const layer = Layer.effect(
       finalize: (draft) =>
         Effect.gen(function* () {
           materialized.clear()
-          const seen = new Map<string, string | undefined>()
           for (const [name, source] of draft.list()) {
             if (source.type === "local") {
               materialized.set(
@@ -65,8 +65,8 @@ export const layer = Layer.effect(
                 new Info({
                   name,
                   path: source.path,
-                  description: source.description,
-                  hidden: source.hidden,
+                  ...(source.description === undefined ? {} : { description: source.description }),
+                  ...(source.hidden === undefined ? {} : { hidden: source.hidden }),
                   source,
                 }),
               )
@@ -81,16 +81,13 @@ export const layer = Layer.effect(
                 continue
               }
             }
-            const target = Repository.cachePath(global.repos, repository)
-            if (seen.has(target) && seen.get(target) !== source.branch) continue
-            seen.set(target, source.branch)
             materialized.set(
               name,
               new Info({
                 name,
-                path: AbsolutePath.make(target),
-                description: source.description,
-                hidden: source.hidden,
+                path: AbsolutePath.make(Repository.cachePath(global.repos, repository, source.branch)),
+                ...(source.description === undefined ? {} : { description: source.description }),
+                ...(source.hidden === undefined ? {} : { hidden: source.hidden }),
                 source,
               }),
             )
@@ -120,3 +117,9 @@ export const layer = Layer.effect(
 )
 
 export const locationLayer = layer
+
+export const node = makeLocationNode({
+  service: Service,
+  layer,
+  deps: [Global.node, EventV2.node, RepositoryCache.node],
+})

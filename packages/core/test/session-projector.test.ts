@@ -1,7 +1,9 @@
 import { describe, expect } from "bun:test"
-import { DateTime, Effect, Layer, Schema } from "effect"
-import { asc, eq } from "drizzle-orm"
+import { DateTime, Effect, Schema } from "effect"
+import { asc, eq, sql } from "drizzle-orm"
 import { Database } from "@opencode-ai/core/database/database"
+import { LayerNode } from "@opencode-ai/core/effect/layer-node"
+import { AppNodeBuilder } from "@opencode-ai/core/effect/app-node-builder"
 import { EventV2 } from "@opencode-ai/core/event"
 import { EventTable } from "@opencode-ai/core/event/sql"
 import { ModelV2 } from "@opencode-ai/core/model"
@@ -10,7 +12,6 @@ import { ProjectTable } from "@opencode-ai/core/project/sql"
 import { ProviderV2 } from "@opencode-ai/core/provider"
 import { AbsolutePath } from "@opencode-ai/core/schema"
 import { SessionV2 } from "@opencode-ai/core/session"
-import { LocationServiceMap } from "@opencode-ai/core/location-layer"
 import { SessionEvent } from "@opencode-ai/core/session/event"
 import { SessionMessage } from "@opencode-ai/core/session/message"
 import { Prompt } from "@opencode-ai/core/session/prompt"
@@ -18,12 +19,13 @@ import { SessionMessageUpdater } from "@opencode-ai/core/session/message-updater
 import { SessionProjector } from "@opencode-ai/core/session/projector"
 import { SessionExecution } from "@opencode-ai/core/session/execution"
 import { SessionInput } from "@opencode-ai/core/session/input"
-import { SessionStore } from "@opencode-ai/core/session/store"
 import { SessionInputTable, SessionMessageTable, SessionTable } from "@opencode-ai/core/session/sql"
 import { testEffect } from "./lib/effect"
 import { Snapshot } from "@opencode-ai/core/snapshot"
+import { Location } from "@opencode-ai/core/location"
 
-const it = testEffect(Layer.mergeAll(Database.defaultLayer, EventV2.defaultLayer, SessionProjector.defaultLayer))
+const it = testEffect(AppNodeBuilder.build(LayerNode.group([Database.node, EventV2.node, SessionProjector.node])))
+const sessionsLayer = AppNodeBuilder.build(SessionV2.node, [[SessionExecution.node, SessionExecution.noopLayer]])
 const sessionID = SessionV2.ID.make("ses_projector_test")
 const created = DateTime.makeUnsafe(0)
 const model = { id: ModelV2.ID.make("model"), providerID: ProviderV2.ID.make("provider") }
@@ -43,6 +45,39 @@ const assistantRow = (
 }
 
 describe("SessionProjector", () => {
+  it.effect("projects moved sessions without the transitional context epoch table", () =>
+    Effect.gen(function* () {
+      const { db } = yield* Database.Service
+      const events = yield* EventV2.Service
+      yield* db
+        .insert(ProjectTable)
+        .values({ id: Project.ID.global, worktree: AbsolutePath.make("/project"), sandboxes: [] })
+        .run()
+      yield* db
+        .insert(SessionTable)
+        .values({
+          id: sessionID,
+          project_id: Project.ID.global,
+          slug: "test",
+          directory: "/project",
+          title: "test",
+          version: "test",
+        })
+        .run()
+      yield* db.run(sql`DROP TABLE session_context_epoch`)
+
+      yield* events.publish(SessionEvent.Moved, {
+        sessionID,
+        timestamp: DateTime.makeUnsafe(1),
+        location: Location.Ref.make({ directory: AbsolutePath.make("/project/subdir") }),
+      })
+
+      expect(yield* db.select({ directory: SessionTable.directory }).from(SessionTable).get()).toEqual({
+        directory: "/project/subdir",
+      })
+    }),
+  )
+
   it.effect("projects staged, cleared, and committed reverts", () =>
     Effect.gen(function* () {
       const db = (yield* Database.Service).db
@@ -161,18 +196,7 @@ describe("SessionProjector", () => {
       expect(
         (yield* sessions.context(sessionID)).map((message) => (message.type === "user" ? message.text : message.type)),
       ).toEqual(["first", "second"])
-    }).pipe(
-      Effect.provide(
-        SessionV2.layer.pipe(
-          Layer.provide(LocationServiceMap.layer),
-          Layer.provide(EventV2.defaultLayer),
-          Layer.provide(Database.defaultLayer),
-          Layer.provide(Project.defaultLayer),
-          Layer.provide(SessionStore.defaultLayer),
-          Layer.provide(SessionExecution.noopLayer),
-        ),
-      ),
-    ),
+    }).pipe(Effect.provide(sessionsLayer)),
   )
 
   it.effect("marks an inbox row promoted with the Prompted event sequence", () =>

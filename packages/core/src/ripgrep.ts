@@ -3,7 +3,7 @@ export * as Ripgrep from "./ripgrep"
 import { Context, Effect, Fiber, Layer, Schema, Stream } from "effect"
 import { ChildProcess } from "effect/unstable/process"
 import { Entry, Match } from "@opencode-ai/schema/filesystem"
-import { LayerNode } from "./effect/layer-node"
+import { makeGlobalNode } from "./effect/app-node"
 import { AppProcess, collectStream, waitForAbort } from "./process"
 import { NonNegativeInt, PositiveInt, RelativePath } from "./schema"
 import { RipgrepBinary } from "./ripgrep/binary"
@@ -89,7 +89,7 @@ const failure = (message: string, cause?: unknown) => new Error({ message, cause
 const isInvalidPattern = (stderr: string) =>
   stderr.includes("regex parse error") || stderr.includes("error parsing regex")
 
-export const layer = Layer.effect(
+const layer = Layer.effect(
   Service,
   Effect.gen(function* () {
     const process = yield* AppProcess.Service
@@ -264,7 +264,10 @@ export const layer = Layer.effect(
                 }),
                 line: match.line_number,
                 offset: match.absolute_offset,
-                text: match.lines.text.length > 2_000 ? match.lines.text.slice(0, 2_000) + "..." : match.lines.text,
+                text:
+                  match.lines.text.length > 2_000
+                    ? match.lines.text.slice(0, 2_000).replace(/[\uD800-\uDBFF]$/, "") + "..."
+                    : match.lines.text,
                 submatches: match.submatches.map((submatch) => ({
                   text: submatch.match.text,
                   start: submatch.start,
@@ -278,5 +281,4 @@ export const layer = Layer.effect(
   }),
 )
 
-export const defaultLayer = layer.pipe(Layer.provide(Layer.merge(RipgrepBinary.defaultLayer, AppProcess.defaultLayer)))
-export const node = LayerNode.make(layer, [RipgrepBinary.node, AppProcess.node])
+export const node = makeGlobalNode({ service: Service, layer: layer, deps: [RipgrepBinary.node, AppProcess.node] })
