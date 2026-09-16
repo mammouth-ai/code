@@ -1,5 +1,6 @@
 export * as AISDK from "./aisdk"
 
+import { makeLocationNode } from "./effect/app-node"
 import type { LanguageModelV3 } from "@ai-sdk/provider"
 import { Cause, Context, Effect, Layer, Schema, Scope } from "effect"
 import { ModelV2 } from "./model"
@@ -34,7 +35,7 @@ function wrapSSE(res: Response, ms: number, ctl: AbortController) {
         const id = setTimeout(() => {
           const err = new Error("SSE read timed out")
           ctl.abort(err)
-          void reader.cancel(err)
+          reader.cancel(err).catch(() => {})
           reject(err)
         }, ms)
 
@@ -231,4 +232,4 @@ export const locationLayer = Layer.effect(
   }),
 )
 
-export const defaultLayer = locationLayer
+export const node = makeLocationNode({ service: Service, layer: locationLayer, deps: [] })

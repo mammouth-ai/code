@@ -1,4 +1,3 @@
-import { release } from "node:os"
 import { TextAttributes, type ScrollBoxRenderable } from "@opentui/core"
 import { useKeyboard, useTerminalDimensions } from "@opentui/solid"
 import { createSignal, For, Show } from "solid-js"
@@ -6,6 +5,7 @@ import { getScrollAcceleration } from "../util/scroll"
 import { useClipboard } from "../context/clipboard"
 import { InstallationVersion } from "@opencode-ai/core/installation/version"
 import { useExit } from "../context/exit"
+import { describeOS, describeTerminal } from "../util/system"
 
 export function ErrorComponent(props: { error: Error; reset: () => void; mode?: "dark" | "light" }) {
   const term = useTerminalDimensions()
@@ -219,7 +219,7 @@ function buildIssueURL(message: string, stack: string) {
   // clipped trace is obvious. searchParams.set handles encoding without throwing,
   // so measuring url.toString() is both correct and safe on any input.
   const MAX_URL_LENGTH = 6000
-  const marker = "\n... (truncated)"
+  const marker = "\n… (truncated)"
   const head = `The Mammouth Code TUI crashed with an unexpected error.\n\n**Error:** ${message}\n\n**Stack trace:**\n`
   const setBody = (body: string) => url.searchParams.set("description", head + "```\n" + body + "\n```")
 
@@ -237,23 +237,4 @@ function buildIssueURL(message: string, stack: string) {
   }
   setBody(stack.slice(0, lo) + marker)
   return url
-}
-
-function describeOS() {
-  const name =
-    process.platform === "darwin"
-      ? "macOS"
-      : process.platform === "win32"
-        ? "Windows"
-        : process.platform === "linux"
-          ? "Linux"
-          : process.platform
-  return `${name} ${release()} (${process.arch})`
-}
-
-function describeTerminal() {
-  const program = process.env.TERM_PROGRAM || process.env.TERM || "unknown"
-  const version = process.env.TERM_PROGRAM_VERSION ? ` ${process.env.TERM_PROGRAM_VERSION}` : ""
-  const multiplexer = process.env.TMUX ? " in tmux" : process.env.STY ? " in screen" : ""
-  return `${program}${version}${multiplexer}`
 }

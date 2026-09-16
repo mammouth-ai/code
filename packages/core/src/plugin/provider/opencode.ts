@@ -1,4 +1,4 @@
-import { Duration, Effect, Schema, Stream } from "effect"
+import { Duration, Effect, Schema, Semaphore, Stream } from "effect"
 import type { Scope } from "effect"
 import type { IntegrationOAuthMethodRegistration } from "@opencode-ai/plugin/v2/effect/integration"
 import { define } from "@opencode-ai/plugin/v2/effect/plugin"
@@ -13,7 +13,7 @@ import { ConfigProviderV1 } from "../../v1/config/provider"
 import { ConfigProviderOptionsV1 } from "../../v1/config/provider-options"
 import { ConfigV1 } from "../../v1/config/config"
 
-const defaultServer = "https://console.opencode.ai"
+const defaultServer = "https://opencode.ai/console"
 const clientID = "opencode-cli"
 const methodID = Integration.MethodID.make("device")
 const RemoteResponse = Schema.Struct({ config: ConfigV1.Info })
@@ -45,9 +45,18 @@ function oauth(http: HttpClient.HttpClient) {
     authorize: () =>
       Effect.gen(function* () {
         const device = yield* post(http, `${defaultServer}/auth/device/code`, { client_id: clientID }, Device)
+        const verification = yield* Effect.try({
+          try: () => {
+            const url = new URL(device.verification_uri_complete, `${defaultServer}/`)
+            if (url.protocol !== "http:" && url.protocol !== "https:") throw new Error("expected HTTP(S)")
+            return url
+          },
+          catch: (cause) =>
+            new Error(`Invalid device verification URL: ${cause instanceof Error ? cause.message : String(cause)}`),
+        })
         return {
           mode: "auto" as const,
-          url: `${defaultServer}${device.verification_uri_complete}`,
+          url: verification.href,
           instructions: `Enter code: ${device.user_code}`,
           callback: poll(http, defaultServer, device.device_code, Duration.seconds(device.interval)),
         }
@@ -79,6 +88,7 @@ export const OpencodePlugin = define<HttpClient.HttpClient | EventV2.Service | S
   effect: Effect.fn(function* (ctx) {
     const events = yield* EventV2.Service
     const http = yield* HttpClient.HttpClient
+    const loading = Semaphore.makeUnsafe(1)
     let connected = false
     let providers: typeof ConfigV1.Info.Type.provider | undefined
 
@@ -105,7 +115,7 @@ export const OpencodePlugin = define<HttpClient.HttpClient | EventV2.Service | S
       draft.method.update({ integrationID: "opencode", method: { type: "key", label: "API key (service account)" } })
     })
 
-    yield* load()
+    connected = (yield* ctx.integration.connection.active("opencode")) !== undefined
     yield* ctx.catalog.transform((catalog) => {
       for (const [providerID, item] of Object.entries(providers ?? {})) {
         catalog.provider.update(providerID, (provider) => {
@@ -176,11 +186,13 @@ export const OpencodePlugin = define<HttpClient.HttpClient | EventV2.Service | S
       }
     })
 
+    const refresh = () => loading.withPermit(load().pipe(Effect.andThen(ctx.catalog.reload())))
     yield* events.subscribe(Integration.Event.ConnectionUpdated).pipe(
       Stream.filter((event) => event.data.integrationID === Integration.ID.make("opencode")),
-      Stream.runForEach(() => load().pipe(Effect.andThen(ctx.catalog.reload()))),
+      Stream.runForEach(refresh),
       Effect.forkScoped({ startImmediately: true }),
     )
+    yield* refresh().pipe(Effect.forkScoped)
   }),
 })
 

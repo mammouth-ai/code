@@ -38,6 +38,9 @@ process.env["XDG_STATE_HOME"] = path.join(dir, "state")
 process.env["OPENCODE_MODELS_PATH"] = path.join(import.meta.dir, "tool", "fixtures", "models-api.json")
 process.env["OPENCODE_EXPERIMENTAL_EVENT_SYSTEM"] = "true"
 process.env["OPENCODE_EXPERIMENTAL_WORKSPACES"] = "true"
+// Mammouth Code fork: ModelsDev also fetches the live Mammouth catalog while populating.
+// Keep tests offline and deterministic, matching packages/core/test/preload.ts.
+process.env["OPENCODE_DISABLE_MODELS_FETCH"] = "true"
 
 // Set test home directory to isolate tests from user's actual home directory
 // This prevents tests from picking up real user configs/skills from ~/.claude/skills
