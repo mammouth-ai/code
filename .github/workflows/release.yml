@@ -47,6 +47,14 @@ jobs:
           OPENCODE_VERSION: ${{ steps.version.outputs.version }}
           OPENCODE_CHANNEL: latest
 
+      - name: Smoke test the built binary
+        run: |
+          # The build's own smoke test only runs --version, which never builds the location
+          # layer graph. v1.18.31 shipped with a circular import that left a layer dependency
+          # undefined in the CI bundle only, breaking every prompt. This command builds that graph.
+          cd packages/opencode
+          ./dist/mammouth-linux-x64/bin/mammouth debug file search package.json
+
       - name: Package binaries
         run: |
           cd packages/opencode/dist
