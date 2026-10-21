@@ -193,17 +193,9 @@ function custom(dep: CustomDep): Record<string, CustomLoader> {
         Boolean(yield* dep.auth(input.id)) ||
         Boolean((yield* dep.config()).provider?.["opencode"]?.options?.apiKey)
 
-      if (!ok) {
-        for (const [key, value] of Object.entries(input.models)) {
-          if (value.cost.input === 0) continue
-          delete input.models[key]
-        }
-      }
-
-      return {
-        autoload: Object.keys(input.models).length > 0,
-        options: ok ? {} : { apiKey: "public" },
-      }
+      // Zen's keyless free tier rejects every client except the official OpenCode app
+      // (FreeTierError), so only load the provider when the user brings their own key.
+      return { autoload: ok }
     }),
     "mammouth-ai": Effect.fnUntraced(function* (input: Info) {
       const env = yield* dep.env()
