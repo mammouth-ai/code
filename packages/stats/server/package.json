@@ -1,22 +1,21 @@
 {
   "$schema": "https://json.schemastore.org/package.json",
-  "name": "@opencode-ai/stats-server",
-  "version": "1.18.31",
+  "name": "@opencode/stats-server",
+  "version": "2.1.2",
   "private": true,
   "type": "module",
   "license": "MIT",
-  "main": "./src/server.ts",
+  "main": "./src/stat-sync.ts",
   "exports": {
-    ".": "./src/server.ts"
+    ".": "./src/stat-sync.ts"
   },
   "scripts": {
-    "start": "bun src/server.ts",
-    "typecheck": "tsgo --noEmit"
+    "start": "bun src/stat-sync.ts",
+    "typecheck": "tsc --noEmit"
   },
   "dependencies": {
-    "@aws-sdk/client-firehose": "3.933.0",
     "@effect/platform-node": "catalog:",
-    "@opencode-ai/stats-core": "workspace:*",
+    "@opencode/stats-core": "workspace:*",
     "effect": "catalog:",
     "sst": "catalog:"
   },
@@ -24,7 +23,7 @@
     "@tsconfig/node22": "catalog:",
     "@types/bun": "catalog:",
     "@types/node": "catalog:",
-    "@typescript/native-preview": "catalog:",
+    "@typescript/native": "catalog:",
     "typescript": "catalog:"
   },
   "engines": {

@@ -52,7 +52,7 @@ detect_platform() {
     fi
   fi
 
-  PLATFORM="${BINARY_NAME}-${OS}-${ARCH}${LIBC}${VARIANT}"
+  PLATFORM="${BINARY_NAME}-${OS}-${ARCH}${VARIANT}${LIBC}"
 }
 
 # Get latest version from GitHub API
@@ -156,6 +156,7 @@ setup_path() {
   if [ -f "$PROFILE" ] && grep -q ".mammouth/bin" "$PROFILE"; then
     info "PATH already configured in $PROFILE"
   else
+    mkdir -p "$(dirname "$PROFILE")"
     echo "" >> "$PROFILE"
     echo "# Mammouth Code" >> "$PROFILE"
     echo "$EXPORT_LINE" >> "$PROFILE"

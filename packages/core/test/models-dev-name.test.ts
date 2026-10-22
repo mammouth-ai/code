@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test"
-import { humanizeModelName } from "@opencode-ai/core/models-dev"
+import { humanizeModelName } from "@opencode/core/models-dev"
 
 describe("humanizeModelName", () => {
   test("keeps variant suffixes on Claude models", () => {

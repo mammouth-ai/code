@@ -1,13 +1,12 @@
 {
   "$schema": "https://json.schemastore.org/package.json",
-  "name": "@opencode-ai/stats-core",
-  "version": "1.18.31",
+  "name": "@opencode/stats-core",
+  "version": "2.1.2",
   "private": true,
   "type": "module",
   "license": "MIT",
   "exports": {
     ".": "./src/index.ts",
-    "./athena": "./src/athena.ts",
     "./config": "./src/config.ts",
     "./database": "./src/database.ts",
     "./database/*": "./src/database/*.ts",
@@ -24,10 +23,10 @@
     "db:push": "drizzle-kit push --config=drizzle.config.ts",
     "db:studio": "drizzle-kit studio --config=drizzle.config.ts",
     "honeycomb:backfill": "bun src/honeycomb-backfill.ts",
-    "typecheck": "tsgo --noEmit"
+    "test": "bun test --only-failures",
+    "typecheck": "tsc --noEmit"
   },
   "dependencies": {
-    "@aws-sdk/client-athena": "3.933.0",
     "@planetscale/database": "1.19.0",
     "drizzle-orm": "catalog:",
     "effect": "catalog:",
@@ -37,7 +36,7 @@
     "@tsconfig/node22": "catalog:",
     "@types/bun": "catalog:",
     "@types/node": "catalog:",
-    "@typescript/native-preview": "catalog:",
+    "@typescript/native": "catalog:",
     "drizzle-kit": "catalog:",
     "typescript": "catalog:"
   },

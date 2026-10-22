@@ -23,10 +23,10 @@ jobs:
       - name: Setup Bun
         uses: oven-sh/setup-bun@v2
         with:
-          bun-version: 1.3.14
+          bun-version: 1.4.2
 
       - name: Install dependencies
-        run: bun install
+        run: bun install --frozen-lockfile
 
       - name: Determine version
         id: version
@@ -41,23 +41,23 @@ jobs:
 
       - name: Build CLI
         run: |
-          cd packages/opencode
+          cd packages/cli
           bun run ./script/build.ts
         env:
           OPENCODE_VERSION: ${{ steps.version.outputs.version }}
           OPENCODE_CHANNEL: latest
+          OPENCODE_RELEASE: ""
+          BUN_COMPILE_RELEASE: bun-v1.4.2
 
       - name: Smoke test the built binary
         run: |
-          # The build's own smoke test only runs --version, which never builds the location
-          # layer graph. v1.18.31 shipped with a circular import that left a layer dependency
-          # undefined in the CI bundle only, breaking every prompt. This command builds that graph.
-          cd packages/opencode
-          ./dist/mammouth-linux-x64/bin/mammouth debug file search package.json
+          cd packages/cli
+          ./dist/mammouth-linux-x64/bin/mammouth --version
+          bun run script/service-smoke.ts
 
       - name: Package binaries
         run: |
-          cd packages/opencode/dist
+          cd packages/cli/dist
 
           # Create archives for each platform
           for dir in mammouth-*/; do
@@ -77,8 +77,8 @@ jobs:
           draft: false
           prerelease: false
           files: |
-            packages/opencode/dist/mammouth-*.tar.gz
-            packages/opencode/dist/mammouth-*.zip
+            packages/cli/dist/mammouth-*.tar.gz
+            packages/cli/dist/mammouth-*.zip
           body: |
             ## Mammouth Code v${{ steps.version.outputs.version }}
 
