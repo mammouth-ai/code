@@ -57,7 +57,7 @@ detect_platform() {
 
 # Get latest version from GitHub API
 get_latest_version() {
-  if [ -n "$VERSION" ]; then
+  if [ -n "${VERSION:-}" ]; then
     echo "$VERSION"
     return
   fi
