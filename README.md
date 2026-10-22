@@ -49,6 +49,46 @@ This is used internally and can be invoked using `@general` in messages.
 
 For more info on how to configure Mammouth Code, [**head over to our docs**](https://info.mammouth.ai/).
 
+### Upgrade the upstream OpenCode base
+
+Start Mammouth Code in this repository and run:
+
+```text
+/upgrade-opencode
+/upgrade-opencode 2.1.2
+/upgrade-opencode v2.1.2 hey, make sure you also update our Windows installer checks
+/upgrade-opencode latest check our reasoning-effort variants and model prices
+/upgrade-opencode latest <Notion task URL or additional instructions>
+```
+
+With no version, the command selects the latest stable release from the
+[official OpenCode changelog](https://opencode.ai/changelog) and verifies its tag
+in `anomalyco/opencode`. GitHub's latest-release endpoint still tracks OpenCode 1
+and is not the source for current OpenCode 2 releases.
+An explicit version selects that exact upstream tag.
+
+Everything after the version is an optional free-form comment, just like
+`/upgrade-litellm`. No flag or quoting is required. Use it for extra work to
+complete and verify during the upgrade, or include a Notion task page alongside
+your instructions. Comments without a version also work and select the latest
+stable release.
+
+The command lives in [`.opencode/command/upgrade-opencode.md`](.opencode/command/upgrade-opencode.md).
+It merges the release on an upgrade branch, audits Mammouth customizations, and
+runs package checks and a compiled-binary smoke test. It leaves the merge ready
+for review without committing, pushing, or creating a PR.
+
+For a V1-to-V2 upgrade, it ports Mammouth behavior into the active `packages/cli`
+implementation and updates the fork's build, installer, updater, and smoke-test
+paths. Keeping changes only in the legacy CLI is not sufficient.
+
+Upstream tags are fetched into `refs/upstream-tags/opencode/`, so a fork release
+tag with the same name stays intact. Release tagging is manual after review and
+commit. Choose the fork release version and tag its release commit, including a
+fourth version component for a fork hotfix when needed.
+
+Quit and restart Mammouth Code after adding or changing the command so it loads.
+
 ### Building on Mammouth Code
 
 If you are working on a project that's related to Mammouth Code and is using "mammouth" as part of its name, for example "mammouth-dashboard" or "mammouth-mobile", please add a note to your README to clarify that it is not built by the Mammouth Code team and is not affiliated with us in any way.
