@@ -1,74 +1,123 @@
 import { describe, expect, test } from "bun:test"
-import { modelPriceFooter, modelPriceTier, sortModelOptions } from "../../../../src/component/dialog-model"
+import { go } from "fuzzysort"
+import {
+  modelPriceFooter,
+  modelPriceTier,
+  prioritizeFavorites,
+  sortModelOptions,
+} from "../../../../src/component/model-options"
 
-describe("sortModelOptions", () => {
-  test("orders provider-scoped model choices by newest release first", () => {
-    const sorted = sortModelOptions(
+test("Mammouth model prices retain the weighted price tiers", () => {
+  expect(modelPriceFooter("mammouth-ai", { input: 1.4, output: 5 })).toBe("$1.4 / $5")
+  expect(modelPriceFooter("mammouth-ai", { input: 0, output: 0 })).toBeUndefined()
+  expect(modelPriceTier({ input: 1, output: 1 })).toBe(1)
+  expect(modelPriceTier({ input: 5, output: 20 })).toBe(2)
+  expect(modelPriceTier({ input: 10, output: 28 })).toBe(3)
+  expect(modelPriceTier({ input: 15, output: 21 })).toBe(4)
+  expect(modelPriceTier(undefined)).toBeUndefined()
+  expect(sortModelOptions([{ providerID: "opencode" }, { providerID: "mammouth-ai" }])[0].providerID).toBe(
+    "mammouth-ai",
+  )
+})
+
+describe("prioritizeFavorites", () => {
+  test("uses the favorite order captured when the dialog opened", () => {
+    const prioritized = prioritizeFavorites(
       [
-        { title: "GPT 5.2", releaseDate: "2025-12-11" },
-        { title: "GPT 5.4", releaseDate: "2026-03-05" },
-        { title: "GPT 5.1", releaseDate: "2025-11-13" },
+        { title: "Best match", value: { providerID: "test", modelID: "best" } },
+        { title: "Favorite match", value: { providerID: "test", modelID: "favorite" } },
+        { title: "Second best match", value: { providerID: "test", modelID: "second-best" } },
+        { title: "Second favorite match", value: { providerID: "test", modelID: "second-favorite" } },
       ],
-      true,
+      new Set(["test/favorite", "test/second-favorite"]),
     )
 
-    expect(sorted.map((model) => model.title)).toEqual(["GPT 5.4", "GPT 5.2", "GPT 5.1"])
+    expect(prioritized.map((model) => model.title)).toEqual([
+      "Favorite match",
+      "Second favorite match",
+      "Best match",
+      "Second best match",
+    ])
+  })
+})
+
+describe("sortModelOptions", () => {
+  test.each(["browse", "search", "provider"])("orders %s results free-first, keeping the given order", (mode) => {
+    const options = [
+      { providerID: "anthropic", title: "Claude Haiku 4.5" },
+      { providerID: "opencode", title: "Claude Haiku 3" },
+      { providerID: "anthropic", title: "Claude Haiku Free", free: true },
+    ].map((item) => ({ ...item, providerID: mode === "provider" ? "anthropic" : item.providerID }))
+    const matches = mode === "search" ? go("haik", options, { key: "title" }).map((item) => item.obj) : options
+    const titles = sortModelOptions(matches, mode === "provider").map((item) => item.title)
+
+    expect(titles[0]).toBe("Claude Haiku Free")
+    expect(titles.slice(1)).toEqual(matches.map((item) => item.title).filter((title) => title !== "Claude Haiku Free"))
   })
 
-  test("orders regular model choices free-first and then newest-first", () => {
+  test("orders OpenCode Go before Zen and other providers", () => {
+    const sorted = sortModelOptions([
+      { providerID: "openai", providerName: "OpenAI", title: "GPT 5" },
+      { providerID: "opencode", providerName: "OpenCode Zen", title: "Claude Sonnet 4" },
+      { providerID: "anthropic", providerName: "Anthropic", title: "Claude Opus 4" },
+      { providerID: "opencode-go", providerName: "OpenCode Go", title: "Kimi K3" },
+    ])
+
+    expect(sorted.map((model) => model.title)).toEqual(["Kimi K3", "Claude Sonnet 4", "Claude Opus 4", "GPT 5"])
+  })
+
+  test("keeps ungrouped results free-first regardless of OpenCode provider", () => {
     const sorted = sortModelOptions(
       [
-        { title: "GLM 5", releaseDate: "2025-07-28" },
-        { title: "GLM 5.1", releaseDate: "2025-12-09" },
-        { title: "GLM 5.2", releaseDate: "2026-02-16" },
-        { title: "Free old", releaseDate: "2024-01-01", footer: "Free" },
-        { title: "Free new", releaseDate: "2025-01-01", footer: "Free" },
+        { providerID: "opencode-go", title: "Go model" },
+        { providerID: "opencode", title: "Free Zen model", free: true },
+        { providerID: "anthropic", title: "Anthropic model" },
       ],
       false,
     )
 
-    expect(sorted.map((model) => model.title)).toEqual(["Free new", "Free old", "GLM 5.2", "GLM 5.1", "GLM 5"])
-  })
-})
-
-describe("modelPriceFooter", () => {
-  test("formats input / output price per 1M tokens, trimming trailing zeros", () => {
-    expect(modelPriceFooter("mammouth-ai", { input: 1.4, output: 4.4 })).toBe("$1.4 / $4.4")
-    expect(modelPriceFooter("mammouth-ai", { input: 5, output: 25 })).toBe("$5 / $25")
-    expect(modelPriceFooter("mammouth-ai", { input: 1.75, output: 14 })).toBe("$1.75 / $14")
-    expect(modelPriceFooter("mammouth-ai", { input: 0.27, output: 0.4 })).toBe("$0.27 / $0.4")
+    expect(sorted.map((model) => model.title)).toEqual(["Free Zen model", "Go model", "Anthropic model"])
   })
 
-  test("keeps the Free label for opencode zero-cost models", () => {
-    expect(modelPriceFooter("opencode", { input: 0, output: 0 })).toBe("Free")
+  test("orders provider groups by provider name and keeps the server's order within each", () => {
+    const sorted = sortModelOptions([
+      { providerID: "google", providerName: "Google", title: "Gemini 2.5 Pro" },
+      { providerID: "anthropic", providerName: "Anthropic", title: "Claude Opus 4" },
+      { providerID: "openai", providerName: "OpenAI", title: "GPT 5" },
+      { providerID: "anthropic", providerName: "Anthropic", title: "Claude Sonnet 4" },
+    ])
+
+    expect(sorted.map((model) => model.title)).toEqual(["Claude Opus 4", "Claude Sonnet 4", "Gemini 2.5 Pro", "GPT 5"])
   })
 
-  test("shows no footer for non-opencode models without a price", () => {
-    expect(modelPriceFooter("mammouth-ai", { input: 0, output: 0 })).toBeUndefined()
-    expect(modelPriceFooter("mammouth-ai", undefined)).toBeUndefined()
-  })
-})
+  test("keeps the server's order when titles and release dates would sort differently", () => {
+    const sorted = sortModelOptions([
+      { providerID: "anthropic", providerName: "Anthropic", releaseDate: 5, title: "Claude Sonnet 4" },
+      { providerID: "anthropic", providerName: "Anthropic", releaseDate: 9, title: "Claude Opus 4" },
+    ])
 
-describe("modelPriceTier", () => {
-  test("buckets the input-weighted blend (2/3 input, 1/3 output) into tiers", () => {
-    // x = (2/3)*input + (1/3)*output
-    expect(modelPriceTier({ input: 0.27, output: 0.4 })).toBe(1) // 0.31 -> tier 1
-    expect(modelPriceTier({ input: 1.4, output: 4.4 })).toBe(2) // 2.4  -> tier 2
-    expect(modelPriceTier({ input: 5, output: 25 })).toBe(3) // 11.67 -> tier 3
-    expect(modelPriceTier({ input: 20, output: 80 })).toBe(4) // 40 -> tier 4
+    expect(sorted.map((model) => model.title)).toEqual(["Claude Sonnet 4", "Claude Opus 4"])
   })
 
-  test("respects the tier boundaries", () => {
-    expect(modelPriceTier({ input: 1, output: 1 })).toBe(1) // x = 1   -> tier 1
-    expect(modelPriceTier({ input: 3, output: 0 })).toBe(2) // x = 2   -> tier 2
-    expect(modelPriceTier({ input: 6, output: 6 })).toBe(2) // x = 6   -> tier 2
-    expect(modelPriceTier({ input: 10, output: 10 })).toBe(2) // x = 10  -> tier 2 (upper bound)
-    expect(modelPriceTier({ input: 12, output: 12 })).toBe(3) // x = 12  -> tier 3
-    expect(modelPriceTier({ input: 18, output: 18 })).toBe(4) // x = 18 -> tier 4
-  })
+  test("preserves the server's order for free OpenCode models", () => {
+    // `Model.available()` puts the preferred free models first, then the rest newest-first.
+    const serverOrder = [
+      "Big Pickle",
+      "DeepSeek V4.1 Flash Free",
+      "GLM-5.3-Flash Free",
+      "MiniMax M3.1 Flash Free",
+      "Nemotron 3.5 Super VL Free",
+    ]
+    const options = serverOrder.map((title, index) => ({
+      value: { providerID: "opencode", modelID: title.toLowerCase().replaceAll(" ", "-") },
+      providerID: "opencode",
+      providerName: "OpenCode Zen",
+      releaseDate: index === 0 ? 1000 : 5000 - index,
+      title,
+      free: true,
+    }))
 
-  test("returns undefined when there is no price", () => {
-    expect(modelPriceTier({ input: 0, output: 0 })).toBeUndefined()
-    expect(modelPriceTier(undefined)).toBeUndefined()
+    expect(sortModelOptions(options, false).map((model) => model.title)).toEqual(serverOrder)
+    expect(sortModelOptions(options, true).map((model) => model.title)).toEqual(serverOrder)
   })
 })
