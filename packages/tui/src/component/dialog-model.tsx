@@ -1,52 +1,112 @@
-import { createMemo, createSignal, Show } from "solid-js"
-import { RGBA } from "@opentui/core"
+import type { ModelInfo } from "@opencode/client"
+import { createMemo, createSignal } from "solid-js"
 import { useLocal } from "../context/local"
-import { map, pipe, flatMap, entries, filter, sortBy, take } from "remeda"
 import { DialogSelect } from "../ui/dialog-select"
 import { useDialog } from "../ui/dialog"
-import { useTheme } from "../context/theme"
-import { createDialogProviderOptions, DialogProvider } from "./dialog-provider"
+import { DialogIntegration } from "./dialog-integration"
 import { DialogVariant } from "./dialog-variant"
 import * as fuzzysort from "fuzzysort"
 import { useConnected } from "./use-connected"
-import { useSync } from "../context/sync"
+import { useData } from "../context/data"
+import { modelPreferenceKey } from "../model-preference"
+import { useLocation } from "../context/location"
+import { useNewDesigns } from "../config"
+import {
+  FavoriteMarker,
+  ModelDetail,
+  PriceTier,
+  modelPriceFooter,
+  isFreeModel,
+  prioritizeFavorites,
+  sortModelOptions,
+} from "./model-options"
 
 export function DialogModel(props: { providerID?: string }) {
   const local = useLocal()
-  const sync = useSync()
   const dialog = useDialog()
+
+  function select(providerID: string, modelID: string) {
+    local.model.set({ providerID, modelID }, { recent: true })
+    const list = local.model.variant.list()
+    const cur = local.model.variant.current()
+    if (cur && list.includes(cur)) {
+      dialog.clear()
+      return
+    }
+    if (list.length > 0) {
+      dialog.replace(() => <DialogVariant />)
+      return
+    }
+    dialog.clear()
+  }
+
+  function connect() {
+    dialog.replace(() => (
+      <DialogIntegration onConnected={(providerID) => dialog.replace(() => <DialogModel providerID={providerID} />)} />
+    ))
+  }
+
+  return <DialogConnectedModels providerID={props.providerID} onSelect={select} onConnect={connect} />
+}
+
+function DialogConnectedModels(props: {
+  providerID?: string
+  onSelect: (providerID: string, modelID: string) => void
+  onConnect: () => void
+}) {
+  const local = useLocal()
+  const newDesigns = useNewDesigns()
+  const data = useData()
+  const location = useLocation()
   const [query, setQuery] = createSignal("")
+  // Under new designs, favoriting does not reorder the list until the dialog is reopened.
+  const favoritesAtOpen = [...local.model.favorite()]
+  const favoritePriority = new Set(favoritesAtOpen.map(modelPreferenceKey))
+  const isFavorite = (value: { providerID: string; modelID: string } | undefined) =>
+    value !== undefined &&
+    local.model.favorite().some((item) => item.providerID === value.providerID && item.modelID === value.modelID)
+  // Under new designs the detail row shows the price, so the trailing slot only marks favorites.
+  const trailing = (model: ModelInfo, favorite: boolean) => {
+    if (newDesigns()) return favorite ? <FavoriteMarker /> : undefined
+    return modelPriceFooter(model.providerID, model.cost[0])
+  }
+  // OpenCode's own free models get their own group at the end of the list instead of joining "OpenCode".
+  const freeGroup = (model: ModelInfo) =>
+    newDesigns() && !props.providerID && model.providerID === "opencode" && isFreeModel(model)
 
   const connected = useConnected()
-  const providers = createDialogProviderOptions()
+  const providers = createMemo(
+    () => new Map((data.location.provider.list(location.ref) ?? []).map((item) => [item.id, item])),
+  )
+  const models = createMemo(() => data.location.model.list(location.ref) ?? [])
 
   const showExtra = createMemo(() => connected() && !props.providerID)
 
   const options = createMemo(() => {
     const needle = query().trim()
     const showSections = showExtra() && needle.length === 0
-    const favorites = connected() ? local.model.favorite() : []
+    const favorites = connected() ? (newDesigns() ? favoritesAtOpen : local.model.favorite()) : []
     const recents = local.model.recent()
 
     function toOptions(items: typeof favorites, category: string) {
       if (!showSections) return []
       return items.flatMap((item) => {
-        const provider = sync.data.provider.find((provider) => provider.id === item.providerID)
-        if (!provider) return []
-        const model = provider.models[item.modelID]
+        const model = models().find((model) => model.providerID === item.providerID && model.id === item.modelID)
         if (!model) return []
+        const provider = providers().get(model.providerID)
         return [
           {
             key: item,
-            value: { providerID: provider.id, modelID: model.id },
-            title: model.name ?? item.modelID,
-            titleSuffix: priceTierView(model.cost),
-            description: provider.name,
+            value: { providerID: model.providerID, modelID: model.id },
+            title: model.name,
+            titleSuffix: <PriceTier cost={model.cost[0]} />,
+            releaseDate: model.time.released,
+            description: provider?.name ?? model.providerID,
             category,
-            disabled: provider.id === "opencode" && model.id.includes("-nano"),
-            footer: modelPriceFooter(provider.id, model.cost),
+            footer: trailing(model, isFavorite(item)),
+            detail: newDesigns() ? () => <ModelDetail model={model} /> : undefined,
             onSelect: () => {
-              onSelect(provider.id, model.id)
+              props.onSelect(model.providerID, model.id)
             },
           },
         ]
@@ -61,81 +121,72 @@ export function DialogModel(props: { providerID?: string }) {
       "Recent",
     )
 
-    const providerOptions = pipe(
-      sync.data.provider,
-      sortBy(
-        (provider) => provider.id !== "opencode",
-        (provider) => provider.name,
-      ),
-      flatMap((provider) =>
-        pipe(
-          provider.models,
-          entries(),
-          filter(([_, info]) => info.status !== "deprecated"),
-          filter(([_, info]) => (props.providerID ? info.providerID === props.providerID : true)),
-          map(([model, info]) => ({
-            value: { providerID: provider.id, modelID: model },
-            title: info.name ?? model,
-            titleSuffix: priceTierView(info.cost),
-            releaseDate: info.release_date,
-            description: favorites.some((item) => item.providerID === provider.id && item.modelID === model)
-              ? "(Favorite)"
-              : undefined,
-            category: connected() ? provider.name : undefined,
-            disabled: provider.id === "opencode" && model.includes("-nano"),
-            footer: modelPriceFooter(provider.id, info.cost),
+    const modelOptions = sortModelOptions(
+      models()
+        .filter((model) => model.status !== "deprecated")
+        .filter((model) => (props.providerID ? model.providerID === props.providerID : true))
+        .map((model) => {
+          const provider = providers().get(model.providerID)
+          const value = { providerID: model.providerID, modelID: model.id }
+          // Users with nothing connected can only favorite models in the free picker (new designs); this picker keeps them unavailable.
+          const favorite = connected() && isFavorite(value)
+          return {
+            value,
+            providerID: model.providerID,
+            providerName: provider?.name ?? model.providerID,
+            title: model.name,
+            titleSuffix: <PriceTier cost={model.cost[0]} />,
+            releaseDate: model.time.released,
+            description: newDesigns() ? undefined : favorite ? "(Favorite)" : undefined,
+            category: connected() ? (freeGroup(model) ? "Free" : (provider?.name ?? model.providerID)) : undefined,
+            footer: trailing(model, favorite),
+            free: isFreeModel(model),
+            detail: newDesigns() ? () => <ModelDetail model={model} /> : undefined,
             onSelect() {
-              onSelect(provider.id, model)
+              props.onSelect(model.providerID, model.id)
             },
-          })),
-          filter((option) => {
-            if (!showSections) return true
-            if (
-              favorites.some(
-                (item) => item.providerID === option.value.providerID && item.modelID === option.value.modelID,
-              )
+          }
+        })
+        .filter((option) => {
+          if (!showSections) return true
+          if (
+            favorites.some(
+              (item) => item.providerID === option.value.providerID && item.modelID === option.value.modelID,
             )
-              return false
-            if (
-              recents.some(
-                (item) => item.providerID === option.value.providerID && item.modelID === option.value.modelID,
-              )
-            )
-              return false
-            return true
-          }),
-          (options) => sortModelOptions(options, props.providerID !== undefined),
-        ),
-      ),
+          )
+            return false
+          if (
+            recents.some((item) => item.providerID === option.value.providerID && item.modelID === option.value.modelID)
+          )
+            return false
+          return true
+        }),
+      connected(),
     )
 
-    const popularProviders = !connected()
-      ? pipe(
-          providers(),
-          map((option) => ({
-            ...option,
-            category: "Popular providers",
-          })),
-          take(6),
-        )
-      : []
-
     if (needle) {
-      return [
-        ...sortModelOptions(
-          fuzzysort.go(needle, providerOptions, { keys: ["title", "category"] }).map((x) => x.obj),
+      const results = prioritizeFavorites(
+        sortModelOptions(
+          fuzzysort.go(needle, modelOptions, { keys: ["title", "category"] }).map((item) => item.obj),
           false,
         ),
-        ...fuzzysort.go(needle, popularProviders, { keys: ["title"] }).map((x) => x.obj),
-      ]
+        favoritePriority,
+      )
+      // Search results name the provider inline. Without a category, the trailing slot keeps the favorite marker
+      // instead of falling back to the provider name.
+      if (!newDesigns()) return results
+      return results.map((option) => ({ ...option, description: option.providerName, category: undefined }))
     }
 
-    return [...favoriteOptions, ...recentOptions, ...providerOptions, ...popularProviders]
+    return [
+      ...favoriteOptions,
+      ...recentOptions,
+      ...modelOptions.filter((option) => option.category !== "Free"),
+      ...modelOptions.filter((option) => option.category === "Free"),
+    ]
   })
 
-  const provider = createMemo(() =>
-    props.providerID ? sync.data.provider.find((item) => item.id === props.providerID) : null,
-  )
+  const provider = createMemo(() => (props.providerID ? providers().get(props.providerID) : undefined))
 
   const title = createMemo(() => {
     const value = provider()
@@ -143,35 +194,27 @@ export function DialogModel(props: { providerID?: string }) {
     return value.name
   })
 
-  function onSelect(providerID: string, modelID: string) {
-    local.model.set({ providerID, modelID }, { recent: true })
-    const list = local.model.variant.list()
-    const cur = local.model.variant.selected()
-    if (cur === "default" || (cur && list.includes(cur))) {
-      dialog.clear()
-      return
-    }
-    if (list.length > 0) {
-      dialog.replace(() => <DialogVariant />)
-      return
-    }
-    dialog.clear()
-  }
-
   return (
     <DialogSelect<ReturnType<typeof options>[number]["value"]>
+      searchInTitle
+      titlePlaceholder="Search models"
       options={options()}
       actions={[
         {
           command: "model.dialog.provider",
-          title: connected() ? "Connect provider" : "View all providers",
-          onTrigger() {
-            dialog.replace(() => <DialogProvider />)
-          },
+          title: newDesigns()
+            ? connected()
+              ? "connect integration"
+              : "view all integrations"
+            : connected()
+              ? "Connect an integration"
+              : "View all integrations",
+          selection: "none",
+          onTrigger: props.onConnect,
         },
         {
           command: "model.dialog.favorite",
-          title: "Favorite",
+          title: newDesigns() ? (option) => (isFavorite(option?.value) ? "unfavorite" : "favorite") : "Favorite",
           hidden: !connected(),
           onTrigger: (option) => {
             local.model.toggleFavorite(option.value as { providerID: string; modelID: string })
@@ -184,91 +227,5 @@ export function DialogModel(props: { providerID?: string }) {
       title={title()}
       current={local.model.current()}
     />
-  )
-}
-
-// Costs are stored as USD per 1M tokens. Trim to at most 2 decimals so prices
-// read as "$1.4" / "$5" / "$0.27" rather than "$1.40" / "$5.00".
-function formatModelPrice(value: number): string {
-  return `$${Math.round(value * 100) / 100}`
-}
-
-// Right-aligned price column shown on each picker row: "$<input> / $<output>"
-// per 1M tokens. opencode's free models keep their "Free" label, and models
-// without a positive input price show no footer.
-export function modelPriceFooter(
-  providerID: string,
-  cost: { input?: number; output?: number } | undefined,
-): string | undefined {
-  const input = cost?.input ?? 0
-  if (input === 0) return providerID === "opencode" ? "Free" : undefined
-  return `${formatModelPrice(input)} / ${formatModelPrice(cost?.output ?? 0)}`
-}
-
-// A coarse 1-4 price tier shown as a "$$·" indicator after the model name.
-// The calculation is a weighted average price per token, 2:1 for input vs output: x = (2*input + output) / 3.
-// Tiers (USD per 1M tokens): x<=1 -> 1, 1<x<=10 -> 2, 10<x<17 -> 3, x>=17 -> 4.
-export function modelPriceTier(cost: { input?: number; output?: number } | undefined): number | undefined {
-  const input = cost?.input ?? 0
-  const output = cost?.output ?? 0
-  if (input === 0 && output === 0) return undefined
-  const x = (2 * input + output) / 3
-  if (x <= 1) return 1
-  if (x <= 10) return 2
-  if (x < 17) return 3
-  return 4
-}
-
-// Renders the tier as filled "$" (colored green->yellow->orange->red by tier)
-// plus dimmed "·" placeholders up to 3, with a trailing "+" for the top tier.
-function PriceTier(props: { tier: number }) {
-  const { theme } = useTheme()
-  const color = createMemo(() => {
-    switch (props.tier) {
-      case 1:
-        return theme.success
-      case 2:
-        return theme.warning
-      case 3:
-        return RGBA.fromValues(
-          (theme.warning.r + theme.error.r) / 2,
-          (theme.warning.g + theme.error.g) / 2,
-          (theme.warning.b + theme.error.b) / 2,
-          1,
-        )
-      default:
-        return theme.error
-    }
-  })
-  const filled = "$".repeat(Math.min(props.tier, 3))
-  const dots = "·".repeat(Math.max(0, 3 - props.tier))
-  return (
-    <>
-      <span style={{ fg: color() }}> {filled}</span>
-      <Show when={dots}>
-        <span style={{ fg: theme.textMuted }}>{dots}</span>
-      </Show>
-      <Show when={props.tier >= 4}>
-        <span style={{ fg: color() }}>+</span>
-      </Show>
-    </>
-  )
-}
-
-function priceTierView(cost: { input?: number; output?: number } | undefined) {
-  const tier = modelPriceTier(cost)
-  return tier ? <PriceTier tier={tier} /> : undefined
-}
-
-export function sortModelOptions<T extends { footer?: string; releaseDate: string | number; title: string }>(
-  options: T[],
-  newestFirst: boolean,
-) {
-  if (newestFirst) return sortBy(options, [(option) => option.releaseDate, "desc"], (option) => option.title)
-  return sortBy(
-    options,
-    (option) => option.footer !== "Free",
-    [(option) => option.releaseDate, "desc"],
-    (option) => option.title,
   )
 }

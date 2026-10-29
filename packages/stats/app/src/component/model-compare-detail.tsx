@@ -1,12 +1,12 @@
 import { Link, Meta, Title } from "@solidjs/meta"
-import { ProviderIcon } from "@opencode-ai/ui/provider-icon"
+import { ProviderIcon } from "@opencode/ui/provider-icon"
 import {
   getStatsModelsComparisonData,
   type ModelUsagePoint,
   type RetentionEntry,
   type StatsModelComparisonInput,
   type StatsModelComparisonEntry,
-} from "@opencode-ai/stats-core/domain/home"
+} from "@opencode/stats-core/domain/home"
 import { createAsync, query, useParams, useSearchParams } from "@solidjs/router"
 import { createEffect, createMemo, createSignal, For, onMount, Show } from "solid-js"
 import { getRequestEvent } from "solid-js/web"
@@ -19,7 +19,9 @@ import {
   type ComparisonPair,
 } from "../routes/compare-cards"
 import { ComparisonRadar } from "../routes/compare-radar"
+import { setStatsPageCacheHeaders } from "../routes/stats-cache"
 import {
+  catalogLabPath,
   catalogSlug,
   findModelCatalogEntry,
   formatCatalogLabName,
@@ -48,6 +50,8 @@ import {
 } from "../lib/comparison-pages"
 import { baseUrl } from "../lib/language"
 import { runStatsEffect } from "../stats-runtime"
+import { breadcrumbList, FormatLinks, JsonLd } from "./agent-meta"
+import { NotFoundMeta } from "./not-found-meta"
 
 const compareHeaderLinks: readonly HeaderLink[] = [
   { href: `${import.meta.env.BASE_URL}#top-models`, label: "Top Models" },
@@ -61,6 +65,7 @@ const compareFooterLinks: readonly HeaderLink[] = [
   { href: `${import.meta.env.BASE_URL}compare`, label: "Model Compare" },
   { href: `${import.meta.env.BASE_URL}#top-models`, label: "Top Models" },
   { href: `${import.meta.env.BASE_URL}#token-cost`, label: "Token Cost" },
+  { href: `${import.meta.env.BASE_URL}#methodology`, label: "Methodology" },
 ]
 const heroLabs = [
   { lab: "deepseek", label: "DeepSeek" },
@@ -117,7 +122,7 @@ const getComparisonData = query(async (models: StatsModelComparisonInput[]) => {
 
 export default function ModelCompareDetailPage(props: ModelCompareDetailPageProps = {}) {
   const event = getRequestEvent()
-  event?.response.headers.set("Cache-Control", "public, max-age=60, s-maxage=300, stale-while-revalidate=86400")
+  setStatsPageCacheHeaders(event?.response.headers)
   const params = useParams()
   const [searchParams] = useSearchParams<{ add?: string }>()
   const firstLabParam = createMemo(() => props.first?.lab ?? params.firstLab ?? "")
@@ -203,21 +208,24 @@ export default function ModelCompareDetailPage(props: ModelCompareDetailPageProp
   const syncComparisonScroll = (source: HTMLDivElement, target: HTMLDivElement | undefined) => {
     if (target && target.scrollLeft !== source.scrollLeft) target.scrollLeft = source.scrollLeft
   }
-  const structuredData = createMemo(() =>
-    JSON.stringify({
-      "@context": "https://schema.org",
-      "@type": "WebPage",
-      name: title(),
-      description: description(),
-      url: canonicalUrl(),
-      about: models().map((model) => ({
-        "@type": "SoftwareApplication",
-        name: model.name,
-        applicationCategory: "AI model",
-        ...(model.labName ? { provider: model.labName } : {}),
-      })),
-    }),
-  )
+  const structuredData = createMemo(() => ({
+    "@context": "https://schema.org",
+    "@type": "WebPage",
+    name: title(),
+    description: description(),
+    url: canonicalUrl(),
+    about: models().map((model) => ({
+      "@type": "SoftwareApplication",
+      name: model.name,
+      applicationCategory: "AI model",
+      ...(model.labName ? { provider: model.labName } : {}),
+    })),
+    breadcrumb: breadcrumbList([
+      { name: "Data", url: new URL("/data/", baseUrl).toString() },
+      { name: "Compare", url: new URL("/data/compare", baseUrl).toString() },
+      { name: `${models()[0].name} vs ${models()[1].name}`, url: canonicalUrl() },
+    ]),
+  }))
   const updateThemePreference = (preference: ThemePreference) => {
     applyThemePreference(preference)
     setThemePreference(preference)
@@ -235,20 +243,29 @@ export default function ModelCompareDetailPage(props: ModelCompareDetailPageProp
 
   return (
     <main data-page="stats" data-layout="compare-detail" data-theme={themePreference()}>
-      <Show when={catalog() !== undefined}>
+      {/* Server-rendered head tags are never removed, so render them once all data has loaded. */}
+      <Show when={catalog() !== undefined && stats() !== undefined}>
         <Title>{title()}</Title>
         <Meta name="description" content={description()} />
-        <Meta name="robots" content={models().length > 2 ? "noindex,follow" : "index,follow"} />
-        <Link rel="canonical" href={canonicalUrl()} />
-        <Meta property="og:type" content="website" />
-        <Meta property="og:site_name" content="OpenCode" />
-        <Meta property="og:title" content={title()} />
-        <Meta property="og:description" content={description()} />
-        <Meta property="og:url" content={canonicalUrl()} />
-        <Meta name="twitter:card" content="summary" />
-        <Meta name="twitter:title" content={title()} />
-        <Meta name="twitter:description" content={description()} />
-        <script type="application/ld+json">{structuredData()}</script>
+        <Show
+          when={models()
+            .slice(0, 2)
+            .every((model) => model.catalog || model.stats)}
+          fallback={<NotFoundMeta unavailable={catalog()?.models.length === 0} />}
+        >
+          <Meta name="robots" content={models().length > 2 ? "noindex,follow" : "index,follow"} />
+          <Link rel="canonical" href={canonicalUrl()} />
+          <Meta property="og:type" content="website" />
+          <Meta property="og:site_name" content="OpenCode" />
+          <Meta property="og:title" content={title()} />
+          <Meta property="og:description" content={description()} />
+          <Meta property="og:url" content={canonicalUrl()} />
+          <Meta name="twitter:card" content="summary" />
+          <Meta name="twitter:title" content={title()} />
+          <Meta name="twitter:description" content={description()} />
+          <FormatLinks path={canonicalPath()} json={false} />
+          <JsonLd data={structuredData()} />
+        </Show>
       </Show>
       <Header
         githubStars={githubStars() ?? githubLink.fallbackStars}
@@ -339,9 +356,8 @@ function ComparisonHero(props: {
       </nav>
       <div data-slot="compare-detail-hero-grid">
         <h1 aria-label={`Compare ${props.models.map((model) => model.name).join(", ")}`}>
-          <span>Compare</span>
-          <HeroModelStack />
-          <span>AI models</span>
+          <span>Compare</span> <HeroModelStack /> <span>AI models</span>
+          <span data-slot="visually-hidden">: {props.models.map((model) => model.name).join(" vs ")}</span>
         </h1>
         <div data-slot="compare-detail-actions">
           <button
@@ -1024,7 +1040,7 @@ function comparisonModelLabel(model: ComparisonModel) {
 
 function providerDetailCell(model: ComparisonModel): ComparisonDetailCell {
   if (!model.labName) return textCell("")
-  return linkedTextCell(model.stats?.author ?? model.labName ?? "", labHref(model.lab))
+  return linkedTextCell(model.stats?.author ?? model.labName ?? "", catalogLabPath(model.lab))
 }
 
 function textCell(value: string): ComparisonDetailCell {
@@ -1069,10 +1085,6 @@ function retentionCell(value: RetentionEntry | null | undefined): ComparisonDeta
 function tokenCell(value: number | undefined, trend: number | undefined): ComparisonDetailCell {
   if (value === undefined) return { value: "No usage" }
   return { value: formatTokens(value), score: value, trend }
-}
-
-function labHref(lab: string) {
-  return `${import.meta.env.BASE_URL}${catalogSlug(lab)}`
 }
 
 function modelSearchText(model: ModelCatalogEntry) {

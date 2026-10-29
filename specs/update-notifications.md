@@ -1,5 +1,52 @@
 # Update notifications
 
+## V2 implementation
+
+The V1 implementation described below moved to `packages/cli/src/services/updater.ts`
+in the v2.1.2 upgrade. The active V2 updater keeps Mammouth's GitHub release source,
+`code.mammouth.ai` installers, four-component version ordering, and notify-by-default
+policy. It only detects `~/.mammouth/bin/mammouth`, with `.exe` on Windows.
+Package-manager detection and upstream package installation are no longer available.
+
+V2 accepts native `update: "disable" | "notify" | "auto"` and the existing
+`autoupdate` values. Automatic installs remain opt-in and patch-only. Minor and
+major upgrades notify. A release older than the running build never triggers an
+automatic downgrade. Both `MAMMOUTH_*` and `OPENCODE_*` update flags work, with
+Mammouth taking precedence.
+
+The Windows updater runs the downloaded PowerShell file with
+`-NoProfile -ExecutionPolicy Bypass -File`. V2 also retains a hard link to an
+installed running image while updating, including while its background service
+runs. This replaces the old Windows Git Bash requirement. Real Windows installer
+and executable-lock verification still needs a Windows host.
+
+Run updater regressions from `packages/cli` with:
+
+```sh
+bun test src/services/updater.test.ts test/updater-install.test.ts test/upgrade.test.ts
+```
+
+The release workflow builds `packages/cli` with Bun 1.4.2 and runs
+`bun run script/service-smoke.ts` against the compiled Mammouth artifact, including
+the real service, embedded web assets, and plugin loading. Run
+`bun run script/migration-smoke.ts` there to verify a disposable V1 database,
+Mammouth credentials/configs, selected model and reasoning variant, conversation
+resume through a local provider, and a second compiled launch. The script also
+checks client configuration migration and saved preferences through their owning
+production modules. It never opens the developer's installed data or service.
+
+The V2 service uses Mammouth's state directory and default port 49376 on POSIX,
+45280 on Windows. Local source builds use the following port. These ports avoid
+the upstream OpenCode service ports, so both installations can coexist.
+
+Linux verification passed on 2026-10-22. Before release, exercise the compiled
+Mammouth binary and installers on real macOS and Windows hosts, including Windows
+replacement while the V2 background service runs. V1 plugins and server API
+consumers need porting; session permission and undo/revert resets are upstream
+migration behavior.
+
+## V1 investigation
+
 Mammouth Code is a fork of opencode. Upstream opencode checks for a new release shortly after the TUI starts and shows an "Update Available" dialog. Mammouth Code never did. This page records why, what was changed, and how to test it.
 
 ## Symptom

@@ -1,432 +1,491 @@
-import path from "path"
-import { Context, Duration, Effect, Layer, Option, Schedule, Schema } from "effect"
-import { FetchHttpClient, HttpClient, HttpClientRequest } from "effect/unstable/http"
-import { ModelsDev } from "@opencode-ai/schema/models-dev"
-import { Global } from "./global"
-import { Flag } from "./flag/flag"
-import { Flock } from "./util/flock"
-import { Hash } from "./util/hash"
-import { FSUtil } from "./fs-util"
-import { InstallationChannel, InstallationVersion } from "./installation/version"
-import { EventV2 } from "./event"
-import { makeGlobalNode } from "./effect/app-node"
-import { httpClient } from "./effect/app-node-platform"
+import { Cause, Context, Duration, Effect, Layer, Option, Schedule, Schema, Semaphore } from "effect"
+import { HttpClient, HttpClientRequest } from "effect/http"
+import { ModelsDev } from "@opencode/schema/models-dev"
+import { Money } from "@opencode/schema/money"
+import { App } from "./app.js"
+import { Hash } from "@opencode/util/hash"
+import { FSUtil } from "@opencode/util/fs-util"
+import { Bus } from "./bus.js"
+import { makeGlobalNode } from "@opencode/util/effect/app-node"
+import { httpClient } from "@opencode/util/effect/app-node-platform"
+import { Model } from "./model.js"
+import { AISDKNative } from "./aisdk-native.js"
+import { Provider } from "./provider.js"
+import { Variant } from "./variant.js"
+import { KV } from "./kv.js"
+import snapshotText from "./models-dev/snapshot.txt" with { type: "text" }
+import { MammouthCatalog } from "./mammouth-catalog.js"
+
+export { humanizeModelName } from "./mammouth-catalog.js"
 
 export const CatalogModelStatus = Schema.Literals(["alpha", "beta", "deprecated"])
 export type CatalogModelStatus = typeof CatalogModelStatus.Type
 
-const InterleavedField = Schema.Union([
-  Schema.Literals(["reasoning", "reasoning_content", "reasoning_text"]),
-  Schema.String,
-])
-
-const USER_AGENT = `opencode/${InstallationChannel}/${InstallationVersion}/${Flag.OPENCODE_CLIENT}`
-
-const CostTier = Schema.Struct({
-  input: Schema.Finite,
-  output: Schema.Finite,
-  cache_read: Schema.optional(Schema.Finite),
-  cache_write: Schema.optional(Schema.Finite),
-  tier: Schema.Struct({
-    type: Schema.Literal("context"),
-    size: Schema.Finite,
-  }),
-})
-
-const Cost = Schema.Struct({
-  input: Schema.Finite,
-  output: Schema.Finite,
-  cache_read: Schema.optional(Schema.Finite),
-  cache_write: Schema.optional(Schema.Finite),
-  tiers: Schema.optional(Schema.Array(CostTier)),
-  context_over_200k: Schema.optional(
-    Schema.Struct({
-      input: Schema.Finite,
-      output: Schema.Finite,
-      cache_read: Schema.optional(Schema.Finite),
-      cache_write: Schema.optional(Schema.Finite),
-    }),
-  ),
-})
-
-const ReasoningOption = Schema.Union([
-  Schema.Struct({
-    type: Schema.Literal("effort"),
-    values: Schema.Array(Schema.NullOr(Schema.String)),
-  }),
-  Schema.Struct({
-    type: Schema.Literal("toggle"),
-  }),
-  Schema.Struct({
-    type: Schema.Literal("budget_tokens"),
-    min: Schema.optional(Schema.Finite),
-    max: Schema.optional(Schema.Finite),
-  }),
-])
-
-export const Model = Schema.Struct({
-  id: Schema.String,
-  name: Schema.String,
-  family: Schema.optional(Schema.String),
-  release_date: Schema.String,
-  attachment: Schema.Boolean,
-  reasoning: Schema.Boolean,
-  efforts: Schema.optional(Schema.Array(Schema.String)),
-  temperature: Schema.Boolean,
-  tool_call: Schema.Boolean,
-  reasoning_options: Schema.optional(Schema.Array(ReasoningOption)),
-  interleaved: Schema.optional(
-    Schema.Union([
-      Schema.Boolean,
-      InterleavedField,
-      Schema.Struct({
-        field: InterleavedField,
-      }),
-    ]),
-  ),
-  cost: Schema.optional(Cost),
-  limit: Schema.Struct({
-    context: Schema.Finite,
-    input: Schema.optional(Schema.Finite),
-    output: Schema.Finite,
-  }),
-  modalities: Schema.optional(
-    Schema.Struct({
-      input: Schema.Array(Schema.Literals(["text", "audio", "image", "video", "pdf"])),
-      output: Schema.Array(Schema.Literals(["text", "audio", "image", "video", "pdf"])),
-    }),
-  ),
-  experimental: Schema.optional(
-    Schema.Struct({
-      modes: Schema.optional(
-        Schema.Record(
-          Schema.String,
-          Schema.Struct({
-            cost: Schema.optional(Cost),
-            provider: Schema.optional(
-              Schema.Struct({
-                body: Schema.optional(Schema.Record(Schema.String, Schema.MutableJson)),
-                headers: Schema.optional(Schema.Record(Schema.String, Schema.String)),
-              }),
-            ),
-          }),
-        ),
-      ),
-    }),
-  ),
-  status: Schema.optional(CatalogModelStatus),
-  provider: Schema.optional(
-    Schema.Struct({ npm: Schema.optional(Schema.String), api: Schema.optional(Schema.String) }),
-  ),
-})
-export type Model = Schema.Schema.Type<typeof Model>
-
-export const Provider = Schema.Struct({
-  api: Schema.optional(Schema.String),
-  name: Schema.String,
-  env: Schema.Array(Schema.String),
-  id: Schema.String,
-  npm: Schema.optional(Schema.String),
-  models: Schema.Record(Schema.String, Model),
-})
-
-export type Provider = Schema.Schema.Type<typeof Provider>
-
-// --- Mammouth AI dynamic model catalog (fork) ---
-// The Mammouth API exposes its available models at /public/model/info; we fetch
-// and fold them into the models.dev catalog under a synthetic "mammouth-ai"
-// provider so the rest of the provider system treats them like any other.
-const MAMMOUTH_API_BASE = "https://api.mammouth.ai"
-
-// The Mammouth-curated default.
-export const MAMMOUTH_RECOMMENDED_MODEL_ID = "mammouth-recommended"
-
-const ALLOWED_MODEL_FAMILIES = [
-  "claude",
-  "gpt",
-  "o4",
-  "gemini",
-  "mistral",
-  "codestral",
-  "deepseek",
-  "grok",
-  "llama",
-  "kimi",
-  "qwen",
-  "glm",
-  "minimax",
-]
-
-function isAllowedModel(name: string): boolean {
-  if (name === MAMMOUTH_RECOMMENDED_MODEL_ID) return true
-  const lower = name.toLowerCase()
-  return ALLOWED_MODEL_FAMILIES.some((family) => lower.startsWith(family))
+type Cost = {
+  readonly input: Money.USDPerMillionTokens
+  readonly output: Money.USDPerMillionTokens
+  readonly cache_read?: Money.USDPerMillionTokens
+  readonly cache_write?: Money.USDPerMillionTokens
+  readonly tiers?: readonly (Cost & { readonly tier: { readonly type: "context"; readonly size: number } })[]
 }
 
-function capitalize(word: string): string {
-  return word ? word[0].toUpperCase() + word.slice(1) : word
-}
+type Modality = "text" | "audio" | "image" | "video" | "pdf"
 
-export function humanizeModelName(name: string): string {
-  const parts = name.split(/[-_]+/)
-  if (parts.length === 0) return name
-
-  const DIGITS_ONLY = /^\d+$/
-  const VERSION_PART = /^\d+(\.\d+)*$/
-  const isDateSuffix = (p: string) => p.length === 8 && p.startsWith("20") && DIGITS_ONLY.test(p)
-
-  if (parts[0].toLowerCase() === "claude") {
-    const filtered = parts.filter((p) => !isDateSuffix(p))
-    if (DIGITS_ONLY.test(filtered[1] ?? "")) {
-      const versionParts: string[] = []
-      let idx = 1
-      while (idx < filtered.length && DIGITS_ONLY.test(filtered[idx])) {
-        versionParts.push(filtered[idx])
-        idx++
-      }
-      const version = versionParts.join(".")
-      const modelType = capitalize(filtered[idx] ?? "")
-      // Anything after the model type is a variant such as "fast"; keep it so
-      // variants don't collapse onto the base model's name.
-      const variant = filtered
-        .slice(idx + 1)
-        .map((p) => capitalize(p))
-        .join(" ")
-      return `Claude ${version} ${modelType} ${variant}`.trim()
-    }
-    const modelType = capitalize(filtered[1] ?? "")
-    const rest = filtered.slice(2)
-    const versionParts = rest.filter((p) => VERSION_PART.test(p))
-    const variant = rest
-      .filter((p) => !VERSION_PART.test(p))
-      .map((p) => capitalize(p))
-      .join(" ")
-    return [`Claude ${modelType}`, versionParts.join("."), variant].filter(Boolean).join(" ")
+type SourceModel = {
+  readonly id: string
+  readonly name: string
+  readonly family?: string
+  readonly release_date: string
+  readonly attachment: boolean
+  readonly reasoning: boolean
+  readonly reasoning_options?: readonly (
+    | { readonly type: "effort"; readonly values: readonly (string | null)[] }
+    | Exclude<Variant.Support, { type: "effort" }>
+  )[]
+  readonly temperature?: boolean
+  readonly tool_call: boolean
+  readonly interleaved?: boolean | string | { readonly field: string }
+  readonly cost?: Cost
+  readonly limit: { readonly context: number; readonly input?: number; readonly output: number }
+  readonly modalities?: { readonly input: readonly Modality[]; readonly output: readonly Modality[] }
+  readonly experimental?: {
+    readonly modes?: Readonly<
+      Record<
+        string,
+        {
+          readonly cost?: Cost
+          readonly provider?: {
+            readonly body?: Provider.Settings
+            readonly headers?: Readonly<Record<string, string>>
+          }
+        }
+      >
+    >
   }
-
-  const specialCases: Record<string, string> = { gpt: "GPT", o4: "o4", glm: "GLM" }
-  return parts.map((p) => specialCases[p.toLowerCase()] ?? capitalize(p)).join(" ")
+  readonly status?: CatalogModelStatus
+  readonly provider?: {
+    readonly npm?: string
+    readonly api?: string
+    readonly shape?: "responses" | "completions"
+  }
 }
 
-// litellm's supports_reasoning implies the default low/medium/high effort
-// range; none/minimal and the exceptional xhigh/max tiers are opted into
-// per-model via their own supports_* flags in the litellm config.
-function reasoningEfforts(info: any): string[] | undefined {
-  if (!info.supports_reasoning) return undefined
-  const efforts: string[] = []
-  if (info.supports_none_reasoning_effort) efforts.push("none")
-  if (info.supports_minimal_reasoning_effort) efforts.push("minimal")
-  efforts.push("low", "medium", "high")
-  if (info.supports_xhigh_reasoning_effort) efforts.push("xhigh")
-  if (info.supports_max_reasoning_effort) efforts.push("max")
-  return efforts
+type SourceProvider = {
+  readonly api?: string
+  readonly name: string
+  readonly env: readonly string[]
+  readonly id: string
+  readonly npm: string
+  readonly models: Readonly<Record<string, SourceModel>>
 }
 
-function transformApiResponse(data: any): Model[] {
-  if (!data?.data || !Array.isArray(data.data)) return []
+export type Snapshot = {
+  readonly info: Provider.Info
+  readonly models: readonly Model.Info[]
+  readonly environment: readonly string[]
+}
 
-  return data.data
-    .filter((item: any) => isAllowedModel(item.model_name || ""))
-    .map((item: any): Model => {
-      const info = item.model_info || {}
-      const inputModalities: ("text" | "audio" | "image" | "video" | "pdf")[] = ["text"]
-      const outputModalities: ("text" | "audio" | "image" | "video" | "pdf")[] = ["text"]
+function nativePackage(provider: SourceProvider, model?: SourceModel) {
+  const npm = model?.provider?.npm ?? provider.npm
+  return (
+    AISDKNative.native(npm, {
+      providerID: provider.id,
+      modelID: model?.id,
+      shape: model?.provider?.shape,
+    }) ?? Provider.aisdk(npm)
+  )
+}
 
-      if (info.supports_vision) inputModalities.push("image")
-      if (info.supports_pdf_input) inputModalities.push("pdf")
-      if (info.supports_audio_input) inputModalities.push("audio")
-      if (info.supports_audio_output) outputModalities.push("audio")
-
-      return {
-        id: item.model_name,
-        name: humanizeModelName(item.model_name || ""),
-        family: info.litellm_provider ?? undefined,
-        release_date: "",
-        attachment: info.supports_vision || info.supports_pdf_input || false,
-        reasoning: info.supports_reasoning || false,
-        efforts: reasoningEfforts(info),
-        temperature: true,
-        tool_call: info.supports_function_calling || info.supports_tool_choice || false,
-        cost: {
-          input: (info.input_cost_per_token || 0) * 1_000_000,
-          output: (info.output_cost_per_token || 0) * 1_000_000,
-          cache_read: (info.cache_read_input_token_cost || 0) * 1_000_000,
-          cache_write: (info.cache_creation_input_token_cost || 0) * 1_000_000,
-        },
-        limit: {
-          context: (info.max_input_tokens || 0) + (info.max_output_tokens || 0),
-          input: info.max_input_tokens ?? undefined,
-          output: info.max_output_tokens || 0,
-        },
-        modalities: {
-          input: inputModalities,
-          output: outputModalities,
-        },
+function normalize(input: Record<string, SourceProvider>): readonly Snapshot[] {
+  const providers: Snapshot[] = []
+  for (const item of Object.values(input)) {
+    const providerID = Provider.ID.make(item.id)
+    const packageName = nativePackage(item)
+    const info = {
+      id: providerID,
+      name: item.name,
+      activation: "auto",
+      package: packageName,
+      ...(item.api && packageName !== "@opencode/ai/providers/cloudflare-workers-ai"
+        ? { settings: { baseURL: item.api } }
+        : {}),
+    } satisfies Provider.Info
+    const models: Model.Info[] = []
+    for (const model of Object.values(item.models)) {
+      const baseCost = cost(model.cost)
+      const id = Model.ID.make(model.id)
+      const base = modelInfo(item, id, model, { cost: baseCost })
+      const variants = Variant.resolve({ ...base, package: nativePackage(item, model) }, supports(model))
+      models.push({ ...base, variants })
+      for (const [mode, options] of Object.entries(model.experimental?.modes ?? {})) {
+        const modeID = Model.ID.make(`${model.id}-${mode}`)
+        models.push(
+          modelInfo(item, modeID, model, {
+            name: modeName(model, mode),
+            cost: mergeCost(baseCost, options.cost),
+            request: options.provider,
+            variants,
+          }),
+        )
       }
-    })
+    }
+    providers.push({ info, models, environment: [...item.env] })
+  }
+  return providers
 }
 
-export const MAMMOUTH_PROVIDER: Provider = {
-  id: "mammouth-ai",
-  name: "Mammouth AI",
-  api: `${MAMMOUTH_API_BASE}/v1`,
-  npm: "@ai-sdk/openai-compatible",
-  env: ["MAMMOUTH_API_KEY"],
-  models: {},
+function released(date: string) {
+  const time = Date.parse(date)
+  return Number.isFinite(time) ? time : 0
 }
 
-const fetchMammouthModels = Effect.tryPromise(async () => {
-  const response = await fetch(`${MAMMOUTH_API_BASE}/public/model/info`, {
-    headers: { "User-Agent": USER_AGENT },
-    signal: AbortSignal.timeout(10_000),
+function cost(input: SourceModel["cost"]): Model.Info["cost"] {
+  const base = {
+    input: input?.input ?? Money.USDPerMillionTokens.zero,
+    output: input?.output ?? Money.USDPerMillionTokens.zero,
+    cache: {
+      read: input?.cache_read ?? Money.USDPerMillionTokens.zero,
+      write: input?.cache_write ?? Money.USDPerMillionTokens.zero,
+    },
+  }
+  return [
+    base,
+    ...(input?.tiers?.map((item) => ({
+      tier: item.tier,
+      input: item.input,
+      output: item.output,
+      cache: {
+        read: item.cache_read ?? Money.USDPerMillionTokens.zero,
+        write: item.cache_write ?? Money.USDPerMillionTokens.zero,
+      },
+    })) ?? []),
+  ]
+}
+
+function mergeCost(base: Model.Info["cost"], override: SourceModel["cost"] | undefined) {
+  if (!override) return base
+  const next = cost(override)
+  const [baseDefault, ...baseTiers] = base
+  const [nextDefault, ...nextTiers] = next
+  const tierKey = (item: Model.Info["cost"][number]) => `${item.tier?.type ?? "base"}:${item.tier?.size ?? 0}`
+  const merge = (left: Model.Info["cost"][number], right: Model.Info["cost"][number]) => ({
+    ...left,
+    ...right,
+    tier: right.tier ?? left.tier,
+    cache: { ...left.cache, ...right.cache },
   })
-  if (!response.ok) return [] as Model[]
-  return transformApiResponse(await response.json())
-}).pipe(Effect.catch(() => Effect.succeed([] as Model[])))
+  const tiers = new Map(baseTiers.map((item) => [tierKey(item), item]))
+  for (const item of nextTiers) {
+    const current = tiers.get(tierKey(item))
+    tiers.set(tierKey(item), current ? merge(current, item) : item)
+  }
+  return [
+    merge(
+      baseDefault ?? {
+        input: Money.USDPerMillionTokens.zero,
+        output: Money.USDPerMillionTokens.zero,
+        cache: { read: Money.USDPerMillionTokens.zero, write: Money.USDPerMillionTokens.zero },
+      },
+      nextDefault,
+    ),
+    ...tiers.values(),
+  ]
+}
 
-const withMammouthProvider = (base: Record<string, Provider>): Effect.Effect<Record<string, Provider>> =>
-  Flag.OPENCODE_DISABLE_MODELS_FETCH
-    ? Effect.succeed({ ...base, [MAMMOUTH_PROVIDER.id]: { ...MAMMOUTH_PROVIDER } })
-    : fetchMammouthModels.pipe(
-        Effect.map((models) => ({
-          ...base,
-          [MAMMOUTH_PROVIDER.id]: {
-            ...MAMMOUTH_PROVIDER,
-            models: Object.fromEntries(models.map((m) => [m.id, m])),
-          },
-        })),
-      )
+function modeName(model: SourceModel, mode: string) {
+  return `${model.name} ${mode.charAt(0).toUpperCase()}${mode.slice(1)}`
+}
 
-export const Event = ModelsDev.Event
+function supports(model: SourceModel): readonly Variant.Support[] {
+  return (model.reasoning_options ?? []).map((option) =>
+    option.type === "effort"
+      ? { type: "effort", values: option.values.filter((value): value is string => value !== null && value !== "null") }
+      : option,
+  )
+}
 
-declare const OPENCODE_MODELS_DEV: Record<string, Provider> | undefined
+function modelInfo(
+  provider: SourceProvider,
+  id: Model.ID,
+  model: SourceModel,
+  input: {
+    readonly name?: string
+    readonly cost?: Model.Info["cost"]
+    readonly request?: NonNullable<NonNullable<SourceModel["experimental"]>["modes"]>[string]["provider"]
+    readonly variants?: NonNullable<Model.Info["variants"]>
+  } = {},
+): Model.Info {
+  const providerID = Provider.ID.make(provider.id)
+  const resolved = nativePackage(provider, model)
+  const pkg = model.provider?.npm || resolved !== nativePackage(provider) ? resolved : undefined
+  // Per model, so it never merges into a model that overrides to a different package.
+  const settings = {
+    ...(model.provider?.api ? { baseURL: model.provider.api } : {}),
+    ...(resolved === "@opencode/ai/providers/openai-compatible" ? { provider: providerID } : {}),
+  }
+  return {
+    id,
+    modelID: Model.ID.make(model.id),
+    providerID,
+    name: input.name ?? model.name,
+    compatibility: Model.compatibility(model.interleaved),
+    family: model.family ? Model.Family.make(model.family) : undefined,
+    package: pkg,
+    settings: Object.keys(settings).length === 0 ? undefined : settings,
+    capabilities: {
+      tools: model.tool_call,
+      input: [...(model.modalities?.input ?? [])],
+      output: [...(model.modalities?.output ?? [])],
+      temperature: model.temperature,
+    },
+    variants: [...(input.variants ?? [])],
+    time: { released: released(model.release_date) },
+    cost: (input.cost ?? cost(model.cost)).map((item) => ({
+      ...item,
+      tier: item.tier && { ...item.tier },
+      cache: { ...item.cache },
+    })),
+    status: model.status ?? "active",
+    enabled: true,
+    limit: { context: model.limit.context, input: model.limit.input, output: model.limit.output },
+    headers: input.request?.headers ? { ...input.request.headers } : undefined,
+    body: input.request?.body ? { ...input.request.body } : undefined,
+  }
+}
+
+export { Event } from "@opencode/schema/models-dev"
 
 export interface Interface {
-  readonly get: () => Effect.Effect<Record<string, Provider>>
+  readonly get: () => Effect.Effect<readonly Snapshot[]>
   readonly refresh: (force?: boolean) => Effect.Effect<void>
 }
 
+export const Options = Schema.Struct({
+  url: Schema.optional(Schema.String),
+  file: Schema.optional(Schema.String),
+  fetch: Schema.optional(Schema.Boolean),
+  snapshot: Schema.optional(Schema.Boolean),
+})
+export type Options = typeof Options.Type
+
 export class Service extends Context.Service<Service, Interface>()("@opencode/ModelsDev") {}
 
-const layer = Layer.effect(
-  Service,
-  Effect.gen(function* () {
-    const fs = yield* FSUtil.Service
-    const events = yield* EventV2.Service
-    const http = HttpClient.filterStatusOk(
-      (yield* HttpClient.HttpClient).pipe(
-        HttpClient.retryTransient({
-          retryOn: "errors-and-responses",
-          times: 2,
-          schedule: Schedule.exponential(200).pipe(Schedule.jittered),
+const CatalogJson = Schema.fromJsonString(Schema.Record(Schema.String, Schema.Unknown))
+const decodeCatalog = (text: string) =>
+  Schema.decodeUnknownEffect(CatalogJson)(text).pipe(Effect.map((catalog) => catalog as Record<string, SourceProvider>))
+const Cache = Schema.Struct({
+  updatedAt: Schema.Number,
+  // Digest of the raw body, persisted so refresh() can skip republishing a
+  // byte-identical catalog. Optional for entries written before it existed.
+  digest: Schema.optional(Schema.String),
+  body: CatalogJson,
+})
+const defaultSource = "https://models.opencode.ai"
+
+// Bundled snapshot of https://models.opencode.ai/api.json, committed at
+// packages/core/src/models-dev/snapshot.txt and refreshed via
+// `bun run script/update-models-snapshot.ts`. Decoded and normalized once per
+// isolate: the snapshot is a multi-MB module-level constant and one isolate can
+// host many runtimes (Cloudflare colocates Durable Object instances), so
+// per-runtime decoding would multiply the cost.
+let bundledCache: readonly Snapshot[] | undefined
+const bundledSnapshot = Effect.suspend(() =>
+  bundledCache
+    ? Effect.succeed(bundledCache)
+    : decodeCatalog(snapshotText).pipe(
+        Effect.map((catalog) => {
+          bundledCache = normalize(catalog)
+          return bundledCache
         }),
       ),
-    )
+)
 
-    const source = Flag.OPENCODE_MODELS_URL || "https://models.opencode.ai"
-    const filepath = path.join(
-      Global.Path.cache,
-      source === "https://models.opencode.ai" ? "models.json" : `models-${Hash.fast(source)}.json`,
-    )
-    const ttl = Duration.minutes(5)
-    const lockKey = `models-dev:${filepath}`
+function cacheKey(source: string) {
+  if (source === defaultSource) return "models-dev:catalog"
+  return `models-dev:catalog:${Hash.fast(source)}`
+}
 
-    const fresh = Effect.fnUntraced(function* () {
-      const stat = yield* fs.stat(filepath).pipe(Effect.catch(() => Effect.succeed(undefined)))
-      if (!stat) return false
-      const mtime = Option.getOrElse(stat.mtime, () => new Date(0)).getTime()
-      return Date.now() - mtime < Duration.toMillis(ttl)
-    })
+export function bodyDigest(text: string) {
+  return Hash.sha256(text)
+}
 
-    const fetchApi = Effect.fn("ModelsDev.fetchApi")(function* () {
-      return yield* HttpClientRequest.get(`${source}/api.json`).pipe(
-        HttpClientRequest.setHeader("User-Agent", USER_AGENT),
-        http.execute,
-        Effect.flatMap((res) => res.text),
-        Effect.timeout("10 seconds"),
-      )
-    })
-
-    const loadFromDisk = fs.readJson(Flag.OPENCODE_MODELS_PATH ?? filepath).pipe(
-      Effect.catch((error) => {
-        if (
-          Flag.OPENCODE_MODELS_PATH === undefined &&
-          error._tag === "FileSystemError" &&
-          error.method === "readJson"
-        ) {
-          return fs.remove(filepath, { force: true }).pipe(Effect.ignore, Effect.as(undefined))
-        }
-        return Effect.succeed(undefined)
-      }),
-      Effect.map((v) => v as Record<string, Provider> | undefined),
-    )
-
-    const loadSnapshot = Effect.sync(() =>
-      typeof OPENCODE_MODELS_DEV === "undefined" ? undefined : OPENCODE_MODELS_DEV,
-    )
-
-    const fetchAndWrite = Effect.fn("ModelsDev.fetchAndWrite")(function* () {
-      const text = yield* fetchApi()
-      const tempfile = `${filepath}.${process.pid}.${Date.now()}.tmp`
-      yield* fs.writeWithDirs(tempfile, text).pipe(
-        Effect.andThen(fs.rename(tempfile, filepath)),
-        Effect.catch((error) =>
-          Effect.gen(function* () {
-            yield* fs.remove(tempfile, { force: true }).pipe(Effect.ignore)
-            return yield* Effect.fail(error)
+export const layer = (options?: Options) =>
+  Layer.effect(
+    Service,
+    Effect.gen(function* () {
+      const fs = yield* FSUtil.Service
+      const bus = yield* Bus.Service
+      const app = yield* App.Metadata
+      const kv = yield* KV.Service
+      const http = HttpClient.filterStatusOk(
+        (yield* HttpClient.HttpClient).pipe(
+          HttpClient.retryTransient({
+            retryOn: "errors-and-responses",
+            times: 2,
+            schedule: Schedule.exponential(200).pipe(Schedule.jittered),
           }),
         ),
       )
-      return text
-    })
 
-    const populate = Effect.gen(function* () {
-      const fromDisk = yield* loadFromDisk
-      if (fromDisk) return fromDisk
-      const snapshot = yield* loadSnapshot
-      if (snapshot) return snapshot
-      if (Flag.OPENCODE_DISABLE_MODELS_FETCH) return {}
-      // Flock is cross-process: concurrent opencode CLIs can race on this cache file.
-      const text = yield* Effect.scoped(
-        Effect.gen(function* () {
-          yield* Flock.effect(lockKey)
-          return yield* fetchAndWrite()
-        }),
+      const source = options?.url || defaultSource
+      const fetch = options?.fetch ?? true
+      const userAgent = App.useragent(app)
+      const key = cacheKey(source)
+      const ttl = Duration.minutes(5)
+      const lock = Semaphore.makeUnsafe(1)
+      const loadMammouth = Effect.gen(function* () {
+        const saved = yield* kv.get("mammouth:catalog")
+        const cached = Schema.decodeUnknownOption(MammouthCatalog.Response)(saved)
+        if (fetch && !options?.file) {
+          const response = yield* HttpClientRequest.get(MammouthCatalog.url).pipe(
+            HttpClientRequest.setHeader("User-Agent", userAgent),
+            http.execute,
+            Effect.flatMap((response) => response.json),
+            Effect.flatMap(Schema.decodeUnknownEffect(MammouthCatalog.Response)),
+            Effect.timeout("10 seconds"),
+            Effect.option,
+          )
+          if (Option.isSome(response)) {
+            yield* kv.set("mammouth:catalog", response.value).pipe(Effect.catchCause(() => Effect.void))
+            return MammouthCatalog.snapshot(response.value)
+          }
+        }
+        return MammouthCatalog.snapshot(Option.getOrUndefined(cached))
+      })
+      const [mammouthGet, invalidateMammouth] = yield* Effect.cachedInvalidateWithTTL(loadMammouth, Duration.infinity)
+
+      const loadFromCache = Effect.fnUntraced(function* () {
+        const value = yield* kv.get(key)
+        const cached = Schema.decodeUnknownOption(Cache)(value)
+        if (Option.isSome(cached))
+          return {
+            catalog: cached.value.body as Record<string, SourceProvider>,
+            updatedAt: cached.value.updatedAt,
+            digest: cached.value.digest,
+          }
+        if (value !== undefined) yield* kv.remove(key)
+      })
+
+      const fetchApi = Effect.fn("ModelsDev.fetchApi")(function* () {
+        return yield* HttpClientRequest.get(`${source}/api.json`).pipe(
+          HttpClientRequest.setHeader("User-Agent", userAgent),
+          http.execute,
+          Effect.flatMap((res) => res.text),
+          Effect.timeout("10 seconds"),
+        )
+      })
+
+      const loadFromFile = options?.file
+        ? fs.readJson(options.file).pipe(
+            Effect.map((input) => input as Record<string, SourceProvider>),
+            Effect.orElseSucceed(() => undefined),
+          )
+        : Effect.undefined
+
+      // The bundled snapshot is the boot-time floor for the catalog; the
+      // periodic fetch below still refreshes on top.
+      const loadSnapshot = options?.snapshot === false ? Effect.undefined : bundledSnapshot
+
+      // Best-effort: a cache-write failure must never kill catalog
+      // population. The payload has outgrown some KV backends' per-value
+      // limits (Durable Object SQLite caps values at 2 MB and api.json
+      // passed it in Aug 2026); a boot without a cache hit just refetches.
+      const writeCache = Effect.fn("ModelsDev.writeCache")(function* (text: string, digest = bodyDigest(text)) {
+        yield* kv.set(key, { updatedAt: Date.now(), digest, body: text }).pipe(
+          Effect.catchCauseIf(
+            (cause) => !Cause.hasInterruptsOnly(cause),
+            (cause) => Effect.logWarning("Failed to cache models.dev catalog", { cause }),
+          ),
+        )
+      })
+
+      const fetchAndWrite = Effect.fn("ModelsDev.fetchAndWrite")(function* () {
+        const text = yield* fetchApi()
+        const catalog = yield* decodeCatalog(text)
+        yield* writeCache(text)
+        return catalog
+      })
+
+      const populate = Effect.gen(function* () {
+        const fromFile = yield* loadFromFile
+        if (fromFile) return normalize(fromFile)
+        const cached = options?.file ? undefined : yield* loadFromCache()
+        if (cached) return normalize(cached.catalog)
+        const bundled = yield* loadSnapshot
+        if (bundled) return bundled
+        if (!fetch) return []
+        const catalog = yield* lock.withPermit(
+          Effect.gen(function* () {
+            const stored = options?.file ? undefined : yield* loadFromCache()
+            if (stored) return stored.catalog
+            return yield* fetchAndWrite()
+          }),
+        )
+        return normalize(catalog)
+      }).pipe(
+        Effect.flatMap((catalog) =>
+          catalog.some((item) => item.info.id === "mammouth-ai")
+            ? Effect.succeed(catalog)
+            : mammouthGet.pipe(Effect.map((provider) => [provider, ...catalog])),
+        ),
+        Effect.withSpan("ModelsDev.populate"),
+        Effect.orDie,
       )
-      return JSON.parse(text) as Record<string, Provider>
-    }).pipe(Effect.withSpan("ModelsDev.populate"), Effect.flatMap(withMammouthProvider), Effect.orDie)
 
-    const [cachedGet, invalidate] = yield* Effect.cachedInvalidateWithTTL(populate, Duration.infinity)
+      const [cachedGet, invalidate] = yield* Effect.cachedInvalidateWithTTL(populate, Duration.infinity)
 
-    const get = (): Effect.Effect<Record<string, Provider>> => cachedGet
+      const get = (): Effect.Effect<readonly Snapshot[]> => cachedGet
 
-    const refresh = Effect.fn("ModelsDev.refresh")(function* (force = false) {
-      if (!force && (yield* fresh())) return
-      yield* Effect.scoped(
-        Effect.gen(function* () {
-          yield* Flock.effect(lockKey)
-          // Re-check under the lock: another process may have refreshed between
-          // our outer check and lock acquisition.
-          if (!force && (yield* fresh())) return
-          yield* fetchAndWrite()
-          yield* invalidate
-          yield* events.publish(Event.Refreshed, {})
-        }),
-      ).pipe(
-        Effect.tapCause((cause) => Effect.logError("Failed to fetch models.dev", { cause: cause })),
-        Effect.ignore,
-      )
-    })
+      const refresh = Effect.fn("ModelsDev.refresh")(function* (force = false) {
+        if (fetch && !options?.file) {
+          const previous = yield* mammouthGet
+          yield* invalidateMammouth
+          const current = yield* mammouthGet
+          if (JSON.stringify(previous) !== JSON.stringify(current)) {
+            yield* invalidate
+            yield* bus.publish(ModelsDev.Event.Refreshed, {}, { global: true })
+          }
+        }
+        yield* lock
+          .withPermit(
+            Effect.gen(function* () {
+              const stored = yield* loadFromCache()
+              if (!force && stored && Date.now() - stored.updatedAt < Duration.toMillis(ttl)) return
+              const text = yield* fetchApi()
+              const digest = bodyDigest(text)
+              // models.dev rarely changes between polls; skip the cache write,
+              // invalidation, and Refreshed event for a byte-identical body so
+              // downstream provider/model update listeners stay quiet.
+              if (!force && stored?.digest === digest) return
+              yield* decodeCatalog(text)
+              yield* writeCache(text, digest)
+              yield* invalidate
+              yield* bus.publish(ModelsDev.Event.Refreshed, {}, { global: true })
+            }),
+          )
+          .pipe(
+            Effect.tapCause((cause) => Effect.logError("Failed to fetch models.dev", { cause: cause })),
+            Effect.ignore,
+          )
+      })
 
-    if (!Flag.OPENCODE_DISABLE_MODELS_FETCH && !process.argv.includes("--get-yargs-completions")) {
-      // Schedule.spaced runs the effect once, then waits between completions.
-      yield* Effect.forkScoped(refresh().pipe(Effect.repeat(Schedule.spaced("60 minutes")), Effect.ignore))
-    }
+      if (fetch && !process.argv.includes("--get-yargs-completions")) {
+        // Schedule.spaced runs the effect once, then waits between completions.
+        yield* Effect.forkScoped(refresh().pipe(Effect.repeat(Schedule.spaced(ttl)), Effect.ignore))
+      }
 
-    return Service.of({ get, refresh })
-  }),
-)
+      return Service.of({ get, refresh })
+    }),
+  )
 
-export const node = makeGlobalNode({ service: Service, layer: layer, deps: [FSUtil.node, EventV2.node, httpClient] })
+export function configured(options?: Options) {
+  return makeGlobalNode({
+    service: Service,
+    layer: layer(options),
+    deps: [FSUtil.node, Bus.node, App.node, KV.node, httpClient],
+  })
+}
 
-export * as ModelsDev from "./models-dev"
+export const node = configured()
+
+export * as ModelsDev from "./models-dev.js"
