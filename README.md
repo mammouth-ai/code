@@ -89,6 +89,22 @@ fourth version component for a fork hotfix when needed.
 
 Quit and restart Mammouth Code after adding or changing the command so it loads.
 
+### V1 to V2 migration
+
+V2 keeps Mammouth's data, configuration, credentials, and saved model selections
+in their existing directories. It reads `opencode.db` inside the `mammouth` data
+directory and imports `auth.json` automatically. Existing `mammouth.json(c)` and
+`.mammouth` configuration stays supported.
+
+V2 migrates global terminal settings into `~/.config/mammouth/cli.json`. Plugins
+and integrations using the V1 server API need porting to the V2 contracts. Upstream
+also clears old session-level permissions and undo/revert state during conversion.
+
+The compiled Linux migration fixture verifies conversation history, key import,
+config precedence, saved models and reasoning variants, session resume, and a
+second launch. macOS and Windows installer/migration checks remain a release
+follow-up. See [the V2 verification commands](specs/update-notifications.md#v2-implementation).
+
 ### Building on Mammouth Code
 
 If you are working on a project that's related to Mammouth Code and is using "mammouth" as part of its name, for example "mammouth-dashboard" or "mammouth-mobile", please add a note to your README to clarify that it is not built by the Mammouth Code team and is not affiliated with us in any way.
