@@ -20,7 +20,8 @@ error() { echo -e "${RED}[ERROR]${NC} $1" >&2; exit 1; }
 
 # Detect OS and architecture
 detect_platform() {
-  OS="$(uname -s | tr '[:upper:]' '[:lower:]')"
+  RAW_OS="$(uname -s)"
+  OS="$(echo "$RAW_OS" | tr '[:upper:]' '[:lower:]')"
   ARCH="$(uname -m)"
 
   case "$OS" in
@@ -36,6 +37,18 @@ detect_platform() {
     *) error "Unsupported architecture: $ARCH" ;;
   esac
 
+  # Prefer the native ARM64 artifact when the shell itself runs under emulation.
+  if [ "$OS" = "darwin" ] && [ "$ARCH" = "x64" ]; then
+    if [ "$(sysctl -n sysctl.proc_translated 2>/dev/null || echo 0)" = "1" ]; then
+      ARCH="arm64"
+    fi
+  fi
+  if [ "$OS" = "windows" ] && [ "$ARCH" = "x64" ]; then
+    if [[ "$RAW_OS" == *-ARM64 || "${PROCESSOR_IDENTIFIER:-}" == ARM* ]]; then
+      ARCH="arm64"
+    fi
+  fi
+
   # Check for musl (Alpine Linux, etc.)
   LIBC=""
   if [ "$OS" = "linux" ]; then
@@ -44,11 +57,27 @@ detect_platform() {
     fi
   fi
 
-  # Check for AVX2 support on Linux x64; fall back to baseline binary if absent
+  # Fall back to the baseline binary on x64 hosts without AVX2.
   VARIANT=""
-  if [ "$OS" = "linux" ] && [ "$ARCH" = "x64" ]; then
-    if ! grep -q avx2 /proc/cpuinfo 2>/dev/null; then
+  if [ "$ARCH" = "x64" ]; then
+    if [ "$OS" = "linux" ] && ! grep -qwi avx2 /proc/cpuinfo 2>/dev/null; then
       VARIANT="-baseline"
+    fi
+    if [ "$OS" = "darwin" ] && [ "$(sysctl -n hw.optional.avx2_0 2>/dev/null || echo 0)" != "1" ]; then
+      VARIANT="-baseline"
+    fi
+    if [ "$OS" = "windows" ]; then
+      PS_COMMAND="(Add-Type -MemberDefinition \"[DllImport(\"\"kernel32.dll\"\")] public static extern bool IsProcessorFeaturePresent(int ProcessorFeature);\" -Name Kernel32 -Namespace Win32 -PassThru)::IsProcessorFeaturePresent(40)"
+      AVX2=""
+      if command -v powershell.exe >/dev/null 2>&1; then
+        AVX2=$(powershell.exe -NoProfile -NonInteractive -Command "$PS_COMMAND" 2>/dev/null || true)
+      elif command -v pwsh >/dev/null 2>&1; then
+        AVX2=$(pwsh -NoProfile -NonInteractive -Command "$PS_COMMAND" 2>/dev/null || true)
+      fi
+      AVX2=$(echo "$AVX2" | tr -d '\r' | tr '[:upper:]' '[:lower:]' | tr -d '[:space:]')
+      if [ "$AVX2" != "true" ] && [ "$AVX2" != "1" ]; then
+        VARIANT="-baseline"
+      fi
     fi
   fi
 

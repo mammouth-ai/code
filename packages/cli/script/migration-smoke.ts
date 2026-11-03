@@ -180,7 +180,7 @@ const children: Bun.Subprocess[] = []
 try {
   const version = Bun.spawnSync([binary, "--version"], { env, cwd: project })
   assert.equal(version.exitCode, 0)
-  assert.equal(version.stdout.toString().trim(), "mammouth v2.1.2")
+  assert.equal(version.stdout.toString().trim(), "mammouth v2.2.5")
   for (const launch of [1, 2]) {
     const child = Bun.spawn([binary, "serve", "--stdio", "--port", "0"], {
       cwd: project,

@@ -23,7 +23,7 @@ jobs:
       - name: Setup Bun
         uses: oven-sh/setup-bun@v2
         with:
-          bun-version: 1.4.2
+          bun-version: 1.4.4
 
       - name: Install dependencies
         run: bun install --frozen-lockfile
@@ -47,13 +47,15 @@ jobs:
           OPENCODE_VERSION: ${{ steps.version.outputs.version }}
           OPENCODE_CHANNEL: latest
           OPENCODE_RELEASE: ""
-          BUN_COMPILE_RELEASE: bun-v1.4.2
+          BUN_COMPILE_RELEASE: bun-v1.4.4
 
       - name: Smoke test the built binary
         run: |
           cd packages/cli
           ./dist/mammouth-linux-x64/bin/mammouth --version
+          BUN_BE_BUN=1 ./dist/mammouth-linux-x64/bin/mammouth --version | grep -Fx '1.4.4'
           bun run script/service-smoke.ts
+          OPENCODE_MODELS_SNAPSHOT=../core/src/models-dev/snapshot.txt bun run script/catalog-smoke.ts ./dist/mammouth-linux-x64/bin/mammouth
 
       - name: Package binaries
         run: |

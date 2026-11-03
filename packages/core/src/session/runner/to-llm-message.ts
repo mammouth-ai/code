@@ -6,7 +6,7 @@ import {
   ToolResultPart,
   type ContentPart,
   type ProviderMetadata,
-} from "@opencode/ai"
+} from "@opencode/ai/effect"
 import type { Model } from "@opencode/schema/model"
 import { Option, Schema } from "effect"
 import { fileURLToPath } from "url"
@@ -103,6 +103,7 @@ const userAttachmentContent = (files: readonly FileAttachment[]) => {
 }
 
 const decodeToolInput = Schema.decodeUnknownOption(Schema.fromJsonString(Schema.Unknown))
+const decodeNativeWindow = Schema.decodeUnknownSync(SessionHistory.NativeWindow)
 
 const providerMetadata = (
   provider: string,
@@ -152,8 +153,8 @@ const toolResult = (tool: SessionMessage.AssistantTool, providerMetadata: Provid
 }
 
 const assistant = (message: SessionMessage.Assistant, model: Model.Ref, providerMetadataKey: string) => {
-  const sameProvider = String(message.model.providerID) === String(model.providerID)
-  const sameModel = sameProvider && String(message.model.id) === String(model.id)
+  const sameProvider = message.model.providerID === model.providerID
+  const sameModel = sameProvider && message.model.id === model.id
   const reuseProviderMetadata = sameModel && message.error === undefined
   const reasoningInterrupted = message.content.some(
     (item) => item.type === "reasoning" && item.time !== undefined && item.time.completed === undefined,
@@ -170,8 +171,9 @@ const assistant = (message: SessionMessage.Assistant, model: Model.Ref, provider
         },
       ]
     // Let the destination adapter handle readable reasoning after a model/provider switch.
-    if (item.type === "reasoning")
-      return reuseProviderMetadata && !reasoningInterrupted
+    if (item.type === "reasoning") {
+      if (message.error !== undefined || reasoningInterrupted) return []
+      return reuseProviderMetadata
         ? [
             {
               type: "reasoning",
@@ -180,8 +182,9 @@ const assistant = (message: SessionMessage.Assistant, model: Model.Ref, provider
             },
           ]
         : item.text.length > 0
-          ? [{ type: message.error === undefined && !reasoningInterrupted ? "reasoning" : "text", text: item.text }]
+          ? [{ type: "reasoning", text: item.text }]
           : []
+    }
     // Call-side metadata is model-scoped proof of generation (Gemini thought
     // signatures, OpenAI encrypted reasoning): only the producing model may
     // replay it.
@@ -292,8 +295,7 @@ function toLLMMessage(message: SessionMessage.Info, model: Model.Ref, providerMe
     case "compaction": {
       if (message.status !== "completed") return []
       // History selection only keeps native windows the target model can replay.
-      if (message.native?.messages !== undefined)
-        return [...Schema.decodeUnknownSync(SessionHistory.NativeWindow)(message.native.messages)]
+      if (message.native?.messages !== undefined) return [...decodeNativeWindow(message.native.messages)]
       const kept = SessionRecentText.kept(message)
       return [
         Message.make({

@@ -50,10 +50,7 @@ export const relocate = Effect.fnUntraced(function* (directory: string, destinat
   )
 })
 
-/**
- * Whether the running binary was installed by a package manager or the curl installer, the installs
- * whose upgrades replace it in place. The updater decides the same question from the install location.
- */
+/** Whether the running binary is the curl-installed image that upgrades replace in place. */
 export function installed(home: string) {
   const runtime = path.basename(process.execPath, path.extname(process.execPath)).toLowerCase()
   if (runtime === "bun" || runtime === "node" || runtime === "nodejs") return false

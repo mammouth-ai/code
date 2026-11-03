@@ -26,20 +26,24 @@ Run updater regressions from `packages/cli` with:
 bun test src/services/updater.test.ts test/updater-install.test.ts test/upgrade.test.ts
 ```
 
-The release workflow builds `packages/cli` with Bun 1.4.2 and runs
-`bun run script/service-smoke.ts` against the compiled Mammouth artifact, including
-the real service, embedded web assets, and plugin loading. Run
+The release workflow builds `packages/cli` with Bun 1.4.4, verifies the compiled
+runtime version, and runs `bun run script/service-smoke.ts` against the compiled
+Mammouth artifact, including the real service, embedded web assets, and plugin
+loading. It also runs `catalog-smoke.ts` to verify the embedded models.dev
+snapshot. Run
 `bun run script/migration-smoke.ts` there to verify a disposable V1 database,
 Mammouth credentials/configs, selected model and reasoning variant, conversation
 resume through a local provider, and a second compiled launch. The script also
 checks client configuration migration and saved preferences through their owning
 production modules. It never opens the developer's installed data or service.
 
-The V2 service uses Mammouth's state directory and default port 49376 on POSIX,
-45280 on Windows. Local source builds use the following port. These ports avoid
-the upstream OpenCode service ports, so both installations can coexist.
+The V2 service uses Mammouth's state directory and default installed ports 49376
+on POSIX and 28896 on Windows. Local source builds use 49377 and 28897. The
+Windows mapping avoids reserved WSL/Hyper-V ranges, and all ports remain separate
+from the upstream OpenCode service ports so both installations can coexist.
 
-Linux verification passed on 2026-10-22. Before release, exercise the compiled
+Linux verification passed on 2026-11-03 for v2.2.5, including the compiled
+service, embedded catalog, and migration smoke tests. Before release, exercise the compiled
 Mammouth binary and installers on real macOS and Windows hosts, including Windows
 replacement while the V2 background service runs. V1 plugins and server API
 consumers need porting; session permission and undo/revert resets are upstream

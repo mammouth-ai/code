@@ -25,7 +25,7 @@ New providers should rarely require OpenCode changes. Add the provider to [model
 
 ## Development
 
-Use the Bun version pinned in `package.json`, currently 1.4.2. From the repository root:
+Use the Bun version pinned in `package.json`, currently 1.4.4. From the repository root:
 
 ```bash
 bun install
