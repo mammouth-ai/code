@@ -14,7 +14,7 @@ function Write-Info { param($Message) Write-Host "[INFO] $Message" -ForegroundCo
 function Write-Warn { param($Message) Write-Host "[WARN] $Message" -ForegroundColor Yellow }
 function Write-Err { param($Message) Write-Host "[ERROR] $Message" -ForegroundColor Red; exit 1 }
 
-# Detect architecture
+# Detect architecture and the required x64 instruction-set variant
 function Get-Platform {
     $arch = if ([Environment]::Is64BitOperatingSystem) {
         switch ($env:PROCESSOR_ARCHITECTURE) {
@@ -26,7 +26,19 @@ function Get-Platform {
         Write-Err "32-bit systems are not supported."
     }
 
-    return "mammouth-windows-$arch"
+    $variant = ""
+    if ($arch -eq "x64") {
+        try {
+            $avx2 = (Add-Type -MemberDefinition '[DllImport("kernel32.dll")] public static extern bool IsProcessorFeaturePresent(int ProcessorFeature);' -Name Kernel32 -Namespace Win32 -PassThru)::IsProcessorFeaturePresent(40)
+        } catch {
+            $avx2 = $false
+        }
+        if (-not $avx2) {
+            $variant = "-baseline"
+        }
+    }
+
+    return "mammouth-windows-$arch$variant"
 }
 
 # Get latest version from GitHub API

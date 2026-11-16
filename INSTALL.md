@@ -7,7 +7,7 @@ Mammouth Code is Mammouth AI's fork of [OpenCode](https://github.com/anomalyco/o
 Run the following command in your terminal:
 
 ```bash
-curl -fsSL <https://code.mammouth.ai/install.sh> | bash
+curl -fsSL https://code.mammouth.ai/install.sh | bash
 ```
 
 This works on macOS and Linux.
@@ -45,4 +45,6 @@ To uninstall Mammouth Code, run the following command in your terminal:
 mammouth uninstall
 ```
 
-This will completely remove Mammouth Code from your system, including configurations and sessions.
+V2 removes the application cache and stops its background service. It preserves
+configuration, credentials, and sessions. Follow the printed command to remove
+the installed executable.

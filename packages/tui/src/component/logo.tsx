@@ -1,26 +1,18 @@
-import { TextAttributes } from "@opentui/core"
 import { For } from "solid-js"
-import { useTheme } from "../context/theme"
-import { wordmark, wordmarkGradient } from "../logo"
+import { useTerminalDimensions } from "@opentui/solid"
+import { useThemes } from "../context/theme"
+import { wordmark, smallWordmark, wordmarkGradient } from "../logo"
 
 export function Logo() {
-  const { mode } = useTheme()
-
-  // Resolve the gradient color for a wordmark line, reactive on the theme mode.
-  const color = (index: number) => {
-    const gradient = wordmarkGradient[mode()]
-    return gradient[index] ?? gradient[gradient.length - 1]
-  }
-
+  const themes = useThemes()
+  const dimensions = useTerminalDimensions()
   return (
     <box>
-      <For each={wordmark}>
+      <For each={dimensions().height < 12 ? [] : dimensions().width < 79 ? smallWordmark : wordmark}>
         {(line, index) => (
-          <box flexDirection="row">
-            <text fg={color(index())} attributes={TextAttributes.BOLD} selectable={false}>
-              {line}
-            </text>
-          </box>
+          <text fg={wordmarkGradient[themes.mode()][index()]} selectable={false}>
+            {line}
+          </text>
         )}
       </For>
     </box>
