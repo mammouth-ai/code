@@ -53,16 +53,14 @@ export function StatsPoster(props: { stats: SessionStatsInfo }) {
   )
   const shades = createMemo(() => [
     theme.text.muted,
-    ...[0.3, 0.5, 0.75, 1].map((alpha) =>
-      tint(theme.background.base, theme.categorical[0][200], alpha),
-    ),
+    ...[0.3, 0.5, 0.75, 1].map((alpha) => tint(theme.background.base, theme.categorical[0][200], alpha)),
   ])
 
   return (
     <box width={width()} flexDirection="column" alignItems="center" flexShrink={0} gap={compact() ? 1 : 2}>
       <box width="100%" flexDirection={width() < 44 ? "column" : "row"} justifyContent="space-between">
         <text fg={theme.text.base} attributes={TextAttributes.BOLD}>
-          opencode / stats
+          Mammouth Code / Stats
         </text>
         <text fg={theme.text.muted}>{dates()}</text>
       </box>
@@ -131,7 +129,7 @@ export function StatsPoster(props: { stats: SessionStatsInfo }) {
         </For>
       </box>
       <box width="100%" flexDirection="row" justifyContent="flex-end">
-        <text fg={theme.text.base}>opencode.ai</text>
+        <text fg={theme.text.base}>mammouth.ai</text>
       </box>
     </box>
   )
@@ -166,9 +164,7 @@ function StatsPage(props: { context: Plugin.Context; onClose: () => void }) {
       >
         <Show
           when={!result.error}
-          fallback={
-            <text fg={theme.text.feedback.error.base}>Could not load stats. Reopen /stats to try again.</text>
-          }
+          fallback={<text fg={theme.text.feedback.error.base}>Could not load stats. Reopen /stats to try again.</text>}
         >
           <Show when={result()} fallback={<text fg={theme.text.muted}>Gathering your stats…</text>}>
             {(value) => <StatsPoster stats={value()} />}
